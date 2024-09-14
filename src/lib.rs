@@ -14,9 +14,13 @@ pub async fn handle_connection(mut conn: TcpStream) -> Result<()> {
     let req = reader.read_req().await.context("read request message")?;
     println!("received: {req:?}");
 
+    let correlation_id = req.header().correlation_id;
+
+    // XXX: might need to serialize first to get the full response size
+    // (unless it can be determined statically with the knowledge of payload length)
     let resp = Response::ApiVersions {
         size: 8,
-        correlation_id: 7,
+        correlation_id,
     };
     println!("sending: {resp:?}");
 
