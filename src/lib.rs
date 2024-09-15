@@ -1,7 +1,8 @@
-use anyhow::{Context as _, Result};
+use anyhow::{bail, Context as _, Result};
 use tokio::net::TcpStream;
 
-use kafka::{MessageReader, MessageWriter, Response};
+use kafka::error::KafkaError;
+use kafka::{ApiKey, MessageReader, MessageWriter, RequestMessage, ResponseBody, ResponseMessage};
 
 pub(crate) mod kafka;
 
@@ -11,23 +12,61 @@ pub async fn handle_connection(mut conn: TcpStream) -> Result<()> {
     let mut reader = MessageReader::new(reader);
     let mut writer = MessageWriter::new(writer);
 
-    let req = reader.read_req().await.context("read request message")?;
-    println!("received: {req:?}");
+    // TODO: loop to keep connection alive
 
-    let correlation_id = req.header().correlation_id;
+    let msg = reader.read_request().await.context("read request");
+
+    let msg = match msg {
+        // request handling
+        Ok(msg) => handle_message(msg).await.context("handle message")?,
+
+        // error handling
+        Err(err) => match err.downcast::<KafkaError>() {
+            Ok(err) => handle_error(err).await.context("handle error")?,
+            Err(err) => bail!(err),
+        },
+    };
+
+    println!("response: {msg:?}");
+    writer.write_response(msg).await.context("write response")
+}
+
+async fn handle_message(msg: RequestMessage) -> Result<ResponseMessage> {
+    println!("handling: {msg:?}");
+
+    let body = match msg.header.request_api_key {
+        ApiKey::ApiVersions => ResponseBody::ApiVersions {
+            error_code: Default::default(),
+        },
+        key => unimplemented!("message handling for {key:?}"),
+    };
 
     // XXX: might need to serialize first to get the full response size
     // (unless it can be determined statically with the knowledge of payload length)
-    let resp = Response::ApiVersions {
-        size: 8,
-        correlation_id,
+    Ok(ResponseMessage::new(8, msg.header.correlation_id, body))
+}
+
+async fn handle_error(err: KafkaError) -> Result<ResponseMessage> {
+    println!("handling: {err:?}");
+
+    let Ok(api_key) = ApiKey::try_from(err.api_key) else {
+        bail!(
+            "Unsupported API key ({}), ERR={:?}, ID={}",
+            err.api_key,
+            err.error_code,
+            err.correlation_id
+        );
     };
-    println!("sending: {resp:?}");
 
-    writer
-        .write_resp(resp)
-        .await
-        .context("write response message: ApiVersions")?;
+    let body = match api_key {
+        ApiKey::ApiVersions => ResponseBody::ApiVersions {
+            error_code: err.error_code,
+        },
+        key => unimplemented!("error handling for {key:?}"),
+    };
 
-    writer.flush().await.context("flush data")
+    // TODO: compute actual size
+    let size = 8;
+
+    Ok(ResponseMessage::new(size, err.correlation_id, body))
 }

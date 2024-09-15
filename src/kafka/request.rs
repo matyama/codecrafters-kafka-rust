@@ -1,34 +1,94 @@
-use bytes::Bytes;
+use std::ops::RangeInclusive;
 
-/// Request Header v0
+use anyhow::{ensure, Result};
+use bytes::{Buf, Bytes};
+
+use crate::kafka::error::{ErrorCode, KafkaError};
+
+/// Request header v0
 #[derive(Debug)]
-pub struct Header {
+pub struct RequestHeader {
     pub request_api_key: ApiKey,
-    pub request_api_version: i16,
+    pub request_api_version: ApiVersion,
     pub correlation_id: i32,
     // TODO: v1
+    //
+    // NULLABLE_STRING
+    //
+    // Represents a sequence of characters or null. For non-null strings, first the length N is
+    // given as an INT16. Then N bytes follow which are the UTF-8 encoding of the character
+    // sequence. A null value is encoded with length of -1 and there are no following bytes.
+    //
     //pub client_id: Option<String>,
+    //
     // TODO: v2
+    //
+    // TAGGED_FIELDS
+    //
+    // https://cwiki.apache.org/confluence/display/KAFKA/KIP-482
+    //
     //pub tagged_fields: ()
 }
 
+impl RequestHeader {
+    pub(super) fn parse(mut buf: &[u8]) -> Result<(RequestHeader, usize)> {
+        ensure!(
+            buf.len() >= 8,
+            "request header has at least 8B, got {}B",
+            buf.len()
+        );
+
+        // read header fields (v0)
+        let api_key = buf.get_i16();
+        let api_version = buf.get_i16();
+        let correlation_id = buf.get_i32();
+
+        let kafka_err = |error_code| KafkaError {
+            error_code,
+            api_key,
+            correlation_id,
+        };
+
+        // parse header fields (v0)
+        let request_api_key = ApiKey::try_from(api_key).map_err(kafka_err)?;
+        let request_api_version =
+            ApiVersion::parse(request_api_key, api_version).map_err(kafka_err)?;
+
+        // TODO: read more headers (based on api key and version)
+
+        let header = RequestHeader {
+            request_api_key,
+            request_api_version,
+            correlation_id,
+        };
+
+        Ok((header, 8))
+    }
+}
+
 macro_rules! repr_enum {
-    ($repr:ty; $vis:vis enum $name:ident { $v0:ident = $i0:literal, $($v:ident = $i:literal,)* }) => {
+    (
+        $repr:ty;
+        $vis:vis enum $name:ident {
+            $v0:ident = $i0:literal,
+            $($v:ident = $i:literal,)*
+        }
+    ) => {
+        #[derive(Clone, Copy, Debug)]
         #[repr($repr)]
-        #[derive(Debug)]
         $vis enum $name {
             $v0 = $i0,
             $($v = $i,)*
         }
 
         impl TryFrom<$repr> for $name {
-            type Error = String;
+            type Error = ErrorCode;
 
             fn try_from(value: $repr) -> Result<Self, Self::Error> {
                 match value {
                     $i0 => Ok($name::$v0),
                     $($i => Ok($name::$v),)*
-                    v => Err(format!("unsupported {} variant: {v}", stringify!($name))),
+                    _ => Err(ErrorCode::INVALID_REQUEST),
                 }
             }
         }
@@ -109,20 +169,41 @@ repr_enum! { i16;
     }
 }
 
-#[derive(Debug)]
-pub enum Request {
-    // TODO: structural data
-    ApiVersions {
-        size: i32,
-        header: Header,
-        data: Bytes,
-    },
-}
-
-impl Request {
-    pub(crate) fn header(&self) -> &Header {
+impl ApiKey {
+    #[inline]
+    pub(crate) fn api_versions(&self) -> RangeInclusive<ApiVersion> {
         match self {
-            Self::ApiVersions { header, .. } => header,
+            Self::ApiVersions => ApiVersion(0)..=ApiVersion(4),
+            key => unimplemented!("{key:?}"),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(transparent)]
+pub struct ApiVersion(i16);
+
+impl ApiVersion {
+    pub fn parse(key: ApiKey, version: i16) -> Result<Self, ErrorCode> {
+        let version = ApiVersion(version);
+
+        if !key.api_versions().contains(&version) {
+            Err(ErrorCode::UNSUPPORTED_VERSION)
+        } else {
+            Ok(version)
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct RequestMessage {
+    pub size: i32,
+    pub header: RequestHeader,
+    pub body: RequestBody,
+}
+
+#[derive(Debug)]
+pub enum RequestBody {
+    // TODO: structural data
+    ApiVersions { data: Bytes },
 }
