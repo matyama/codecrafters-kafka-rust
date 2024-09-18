@@ -120,7 +120,7 @@ impl ApiKey {
     pub(crate) fn api_versions(&self) -> Option<RangeInclusive<ApiVersion>> {
         match self {
             //Self::Produce => Some(ApiVersion(0)..=ApiVersion(11)),
-            //Self::Fetch => Some(ApiVersion(0)..=ApiVersion(16)),
+            Self::Fetch => Some(ApiVersion(0)..=ApiVersion(16)),
             Self::ApiVersions => Some(ApiVersion(0)..=ApiVersion(4)),
             _ => None,
         }
@@ -128,10 +128,13 @@ impl ApiKey {
 }
 
 impl HeaderVersion for ApiKey {
+    /// Derives the _request_ header version for this API (key, version) pair.
     fn header_version(&self, api_version: i16) -> i16 {
         match self {
             Self::ApiVersions if api_version >= 3 => 2,
             Self::ApiVersions => 1,
+            Self::Fetch if api_version >= 12 => 2,
+            Self::Fetch => 1,
             _ => 0,
         }
     }

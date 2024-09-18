@@ -106,6 +106,8 @@ pub struct RequestMessage {
 #[derive(Debug)]
 pub enum RequestBody {
     ApiVersions(ApiVersions),
+    #[allow(dead_code)]
+    Fetch(Fetch),
 }
 
 /// # ApiVersions Request
@@ -173,3 +175,7 @@ impl Deserialize for ApiVersions {
         Ok((body, body_bytes))
     }
 }
+
+// TODO: implement
+#[derive(Debug)]
+pub struct Fetch;

@@ -81,6 +81,8 @@ impl Serialize for ResponseMessage {
 #[derive(Debug)]
 pub enum ResponseBody {
     ApiVersions(ApiVersions),
+    #[allow(dead_code)]
+    Fetch(Fetch),
 }
 
 impl HeaderVersion for ResponseBody {
@@ -89,8 +91,8 @@ impl HeaderVersion for ResponseBody {
             // ApiVersions responses always have headers without tagged fields (i.e., v0)
             // Tagged fields are only supported in the body but not in the header.
             Self::ApiVersions(_) => 0,
-            #[allow(unreachable_patterns)]
-            _ => api_version,
+            Self::Fetch(_) if api_version >= 12 => 1,
+            _ => 0,
         }
     }
 }
@@ -101,7 +103,8 @@ impl Serialize for ResponseBody {
         W: AsyncWriteExt + Send + Unpin,
     {
         match self {
-            ResponseBody::ApiVersions(body) => body.write_into(writer, version).await,
+            Self::ApiVersions(body) => body.write_into(writer, version).await,
+            Self::Fetch(_body) => unimplemented!("write Fetch response body"),
         }
     }
 }
@@ -404,3 +407,7 @@ impl Serialize for ApiVersion {
 //        Ok(())
 //    }
 //}
+
+// TODO: implement
+#[derive(Debug)]
+pub struct Fetch;
