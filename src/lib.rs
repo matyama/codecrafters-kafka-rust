@@ -1,3 +1,5 @@
+use std::ops::ControlFlow;
+
 use anyhow::{bail, Context as _, Result};
 use tokio::net::TcpStream;
 
@@ -13,34 +15,41 @@ pub async fn handle_connection(mut conn: TcpStream) -> Result<()> {
     let mut reader = MessageReader::new(reader);
     let mut writer = MessageWriter::new(writer);
 
-    // TODO: loop to keep connection alive
+    loop {
+        let msg = reader.read_request().await.context("read request");
 
-    let msg = reader.read_request().await.context("read request");
+        let (msg, version, control) = match msg {
+            // request handling
+            Ok(msg) => {
+                let version = msg.header.request_api_version.into_inner();
+                let msg = handle_message(msg).await.context("handle message")?;
+                (msg, version, ControlFlow::Continue(()))
+            }
 
-    let (msg, version) = match msg {
-        // request handling
-        Ok(msg) => {
-            let version = msg.header.request_api_version.into_inner();
-            let msg = handle_message(msg).await.context("handle message")?;
-            (msg, version)
+            // error handling
+            Err(err) => match err.downcast::<KafkaError>() {
+                Ok(err) => {
+                    let version = err.api_version;
+                    let msg = handle_error(err).await.context("handle error")?;
+                    (msg, version, ControlFlow::Break(()))
+                }
+                Err(err) => bail!(err),
+            },
+        };
+
+        println!("response: {msg:?}");
+        writer
+            .write_response(msg, version)
+            .await
+            .context("write response")?;
+
+        if control.is_break() {
+            break Ok(());
         }
 
-        // error handling
-        Err(err) => match err.downcast::<KafkaError>() {
-            Ok(err) => {
-                let version = err.api_version;
-                let msg = handle_error(err).await.context("handle error")?;
-                (msg, version)
-            }
-            Err(err) => bail!(err),
-        },
-    };
-
-    println!("response: {msg:?}");
-    writer
-        .write_response(msg, version)
-        .await
-        .context("write response")
+        // cooperatively yield from the connection handler
+        tokio::task::yield_now().await;
+    }
 }
 
 async fn handle_message(msg: RequestMessage) -> Result<ResponseMessage> {
