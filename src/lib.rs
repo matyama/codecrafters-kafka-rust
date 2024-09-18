@@ -1,8 +1,9 @@
 use anyhow::{bail, Context as _, Result};
 use tokio::net::TcpStream;
 
-use kafka::error::KafkaError;
-use kafka::{ApiKey, MessageReader, MessageWriter, RequestMessage, ResponseBody, ResponseMessage};
+use kafka::error::{ErrorCode, KafkaError};
+use kafka::response::{self, ApiVersion, ResponseBody, ResponseHeader, ResponseMessage};
+use kafka::{ApiKey, HeaderVersion, MessageReader, MessageWriter, RequestMessage, WireSize as _};
 
 pub(crate) mod kafka;
 
@@ -16,34 +17,64 @@ pub async fn handle_connection(mut conn: TcpStream) -> Result<()> {
 
     let msg = reader.read_request().await.context("read request");
 
-    let msg = match msg {
+    let (msg, version) = match msg {
         // request handling
-        Ok(msg) => handle_message(msg).await.context("handle message")?,
+        Ok(msg) => {
+            let version = msg.header.request_api_version.into_inner();
+            let msg = handle_message(msg).await.context("handle message")?;
+            (msg, version)
+        }
 
         // error handling
         Err(err) => match err.downcast::<KafkaError>() {
-            Ok(err) => handle_error(err).await.context("handle error")?,
+            Ok(err) => {
+                let version = err.api_version;
+                let msg = handle_error(err).await.context("handle error")?;
+                (msg, version)
+            }
             Err(err) => bail!(err),
         },
     };
 
     println!("response: {msg:?}");
-    writer.write_response(msg).await.context("write response")
+    writer
+        .write_response(msg, version)
+        .await
+        .context("write response")
 }
 
 async fn handle_message(msg: RequestMessage) -> Result<ResponseMessage> {
     println!("handling: {msg:?}");
 
-    let body = match msg.header.request_api_key {
-        ApiKey::ApiVersions => ResponseBody::ApiVersions {
-            error_code: Default::default(),
-        },
+    let version = msg.header.request_api_version.into_inner();
+
+    let (body_size, body) = match msg.header.request_api_key {
+        ApiKey::ApiVersions => {
+            let body = response::ApiVersions {
+                api_keys: ApiKey::iter().filter_map(ApiVersion::new).collect(),
+                ..Default::default()
+            };
+
+            (body.size(version), ResponseBody::ApiVersions(body))
+        }
+
         key => unimplemented!("message handling for {key:?}"),
     };
 
-    // XXX: might need to serialize first to get the full response size
-    // (unless it can be determined statically with the knowledge of payload length)
-    Ok(ResponseMessage::new(8, msg.header.correlation_id, body))
+    // NOTE: response header version may depend on the API key/version
+    let header_version = body.header_version(version);
+
+    let header = ResponseHeader {
+        correlation_id: msg.header.correlation_id,
+        // TODO: TAG_BUFFER
+        tagged_fields: Default::default(),
+    };
+
+    Ok(ResponseMessage {
+        size: (header.size(header_version) + body_size) as i32,
+        header,
+        body,
+    })
 }
 
 async fn handle_error(err: KafkaError) -> Result<ResponseMessage> {
@@ -51,22 +82,49 @@ async fn handle_error(err: KafkaError) -> Result<ResponseMessage> {
 
     let Ok(api_key) = ApiKey::try_from(err.api_key) else {
         bail!(
-            "Unsupported API key ({}), ERR={:?}, ID={}",
+            "Unsupported API key ({} v{}), ERR={:?}, ID={}",
             err.api_key,
+            err.api_version,
             err.error_code,
             err.correlation_id
         );
     };
 
-    let body = match api_key {
-        ApiKey::ApiVersions => ResponseBody::ApiVersions {
-            error_code: err.error_code,
-        },
+    let (body_size, body) = match api_key {
+        ApiKey::ApiVersions => {
+            // Starting from Apache Kafka 2.4 (KIP-511), ApiKeys field is populated with the
+            // supported versions of the ApiVersionsRequest when an UNSUPPORTED_VERSION error is
+            // returned.
+            let body = match err.error_code {
+                error_code @ ErrorCode::UNSUPPORTED_VERSION => response::ApiVersions {
+                    error_code,
+                    api_keys: [api_key].into_iter().filter_map(ApiVersion::new).collect(),
+                    ..Default::default()
+                },
+                error_code => response::ApiVersions {
+                    error_code,
+                    ..Default::default()
+                },
+            };
+
+            (body.size(err.api_version), ResponseBody::ApiVersions(body))
+        }
+
         key => unimplemented!("error handling for {key:?}"),
     };
 
-    // TODO: compute actual size
-    let size = 8;
+    // NOTE: response header version may depend on the API key/version
+    let header_version = body.header_version(err.api_version);
 
-    Ok(ResponseMessage::new(size, err.correlation_id, body))
+    let header = ResponseHeader {
+        correlation_id: err.correlation_id,
+        // TODO: TAG_BUFFER
+        tagged_fields: Default::default(),
+    };
+
+    Ok(ResponseMessage {
+        size: (header.size(header_version) + body_size) as i32,
+        header,
+        body,
+    })
 }

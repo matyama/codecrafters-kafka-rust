@@ -5,6 +5,7 @@
 pub struct KafkaError {
     pub(crate) error_code: ErrorCode,
     pub(crate) api_key: i16,
+    pub(crate) api_version: i16,
     pub(crate) correlation_id: i32,
 }
 
@@ -413,4 +414,13 @@ pub enum ErrorCode {
     /// The server encountered an error with the transaction. The client can abort the transaction
     /// to continue using this transactional ID.
     TRANSACTION_ABORTABLE = 120,
+}
+
+impl crate::kafka::WireSize for ErrorCode {
+    const SIZE: usize = 2;
+
+    #[inline]
+    fn size(&self, _version: i16) -> usize {
+        Self::SIZE
+    }
 }
