@@ -1,4 +1,4 @@
-use anyhow::{Context as _, Result};
+use anyhow::{bail, Context as _, Result};
 use bytes::Bytes;
 use tokio::io::AsyncWriteExt;
 
@@ -216,12 +216,9 @@ impl WireSize for FetchableTopicResponse {
         size += match version {
             0..=11 => Str::from(&self.topic).size(version),
             12 => CompactStr::from(&self.topic).size(version),
+            13.. => self.topic_id.size(version),
             _ => 0,
         };
-
-        if version >= 13 {
-            size += self.topic_id.size(version);
-        }
 
         size += if version >= 12 {
             CompactArray(self.partitions.as_slice()).size(version)
@@ -251,14 +248,13 @@ impl Serialize for FetchableTopicResponse {
                 .write_into(writer, version)
                 .await
                 .context("topic")?,
-            _ => {}
-        }
-
-        if version >= 13 {
-            self.topic_id
+            13.. => self
+                .topic_id
                 .write_into(writer, version)
                 .await
-                .context("topic id")?;
+                .context("topic id")?,
+            // XXX: UNSUPPORTED_VERSION
+            v => bail!("invalid API version: v{v}"),
         }
 
         if version >= 12 {
@@ -342,7 +338,6 @@ pub struct PartitionData {
 }
 
 impl PartitionData {
-    #[allow(dead_code)]
     pub fn new(partition_index: i32, error_code: ErrorCode, high_watermark: i64) -> Self {
         Self {
             partition_index,
@@ -388,10 +383,10 @@ impl WireSize for PartitionData {
         }
 
         size += if version >= 12 {
-            self.records.size(version)
-        } else {
             // NOTE: does not clone the raw bytes, just increments the ref count
             self.records.clone().map(CompactBytes).size(version)
+        } else {
+            self.records.size(version)
         };
 
         if version >= 12 {
@@ -458,12 +453,12 @@ impl Serialize for PartitionData {
 
         if version >= 12 {
             self.records
+                .map(CompactBytes)
                 .write_into(writer, version)
                 .await
                 .context("records")?;
         } else {
             self.records
-                .map(CompactBytes)
                 .write_into(writer, version)
                 .await
                 .context("records")?;

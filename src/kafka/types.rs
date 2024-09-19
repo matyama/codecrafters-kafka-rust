@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use anyhow::{ensure, Context as _, Result};
+use anyhow::{bail, ensure, Context as _, Result};
 use bytes::{Buf, Bytes};
 use tokio::io::AsyncWriteExt;
 
@@ -35,6 +35,13 @@ impl Deserialize for bool {
     fn read_from<B: Buf>(buf: &mut B, _version: i16) -> Result<(Self, usize)> {
         ensure!(buf.has_remaining(), "not enough bytes left");
         Ok((buf.get_u8() > 0, 1))
+    }
+}
+
+impl Deserialize for i32 {
+    fn read_from<B: Buf>(buf: &mut B, _version: i16) -> Result<(Self, usize)> {
+        ensure!(buf.remaining() >= 4, "not enough bytes left");
+        Ok((buf.get_i32(), 4))
     }
 }
 
@@ -198,7 +205,7 @@ impl Serialize for Option<CompactBytes> {
 
 // TODO: TryFrom<Bytes> to validate size
 /// UUID v4 bytes wrapper
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 #[repr(transparent)]
 pub struct Uuid(Bytes);
 
@@ -220,11 +227,18 @@ impl Serialize for Uuid {
     }
 }
 
+impl Deserialize for Uuid {
+    fn read_from<B: Buf>(buf: &mut B, _version: i16) -> Result<(Self, usize)> {
+        ensure!(buf.remaining() >= 16, "not enough bytes left");
+        Ok((Self(buf.copy_to_bytes(16)), 16))
+    }
+}
+
 /// [`Bytes`] wrapper that guarantees UTF-8 encoding.
 ///
 /// Note that this is rather a helper type. For wire-serialized types use either [`Str`] or
 /// [`CompactStr`].
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 #[repr(transparent)]
 pub struct StrBytes(Bytes);
 
@@ -234,6 +248,27 @@ impl TryFrom<Bytes> for StrBytes {
     fn try_from(bytes: Bytes) -> Result<Self, Self::Error> {
         std::str::from_utf8(&bytes).with_context(|| format!("invalid data: {bytes:x?}"))?;
         Ok(Self(bytes))
+    }
+}
+
+impl From<Str> for StrBytes {
+    #[inline]
+    fn from(Str(bytes): Str) -> Self {
+        Self(bytes)
+    }
+}
+
+impl From<Option<Str>> for StrBytes {
+    #[inline]
+    fn from(s: Option<Str>) -> Self {
+        Self(s.map_or(EMPTY, |Str(bytes)| bytes))
+    }
+}
+
+impl From<CompactStr> for StrBytes {
+    #[inline]
+    fn from(CompactStr(bytes): CompactStr) -> Self {
+        Self(bytes)
     }
 }
 
@@ -314,6 +349,15 @@ impl Serialize for Option<Str> {
         } else {
             writer.write_i16(-1).await.context("string length")
         }
+    }
+}
+
+impl Deserialize for Str {
+    fn read_from<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
+        let (Some(s), len) = Deserialize::read_from(buf, version)? else {
+            bail!("empty string");
+        };
+        Ok((s, len))
     }
 }
 
@@ -549,6 +593,35 @@ impl<T: Serialize> Serialize for Array<Option<Vec<T>>> {
     }
 }
 
+impl<T: Deserialize> Deserialize for Array<Vec<T>> {
+    fn read_from<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
+        let (Array(Some(items)), size) = Deserialize::read_from(buf, version)? else {
+            bail!("invalid array length");
+        };
+        Ok((Array(items), size))
+    }
+}
+
+impl<T: Deserialize> Deserialize for Array<Option<Vec<T>>> {
+    fn read_from<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
+        let (len, mut size) = i32::read_from(buf, version).context("array length")?;
+        ensure!(len >= -1, "invalid array length");
+
+        if len == -1 {
+            return Ok((Self(None), size));
+        }
+
+        let mut items = Vec::with_capacity(len as usize);
+        for i in 0..len {
+            let (i, n) = T::read_from(buf, version).with_context(|| format!("array item {i}"))?;
+            items.push(i);
+            size += n;
+        }
+
+        Ok((Self(Some(items)), size))
+    }
+}
+
 /// COMPACT_ARRAY
 ///
 /// Represents a sequence of objects of a given type T. Type T can be either a primitive type
@@ -638,6 +711,36 @@ impl<T: Serialize> Serialize for CompactArray<Option<Vec<T>>> {
                 .context("array len")?;
             Ok(())
         }
+    }
+}
+
+impl<T: Deserialize> Deserialize for CompactArray<Vec<T>> {
+    fn read_from<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
+        let (CompactArray(Some(items)), size) = Deserialize::read_from(buf, version)? else {
+            bail!("invalid compact array length");
+        };
+        Ok((Self(items), size))
+    }
+}
+
+impl<T: Deserialize> Deserialize for CompactArray<Option<Vec<T>>> {
+    fn read_from<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
+        let (UnsignedVarInt(len), mut size) =
+            UnsignedVarInt::read_from(buf, version).context("compact array length")?;
+
+        if len == 0 {
+            return Ok((Self(None), size));
+        }
+
+        let mut items = Vec::with_capacity((len - 1) as usize);
+        for i in 0..(len - 1) {
+            let (i, n) =
+                T::read_from(buf, version).with_context(|| format!("compact array item {i}"))?;
+            items.push(i);
+            size += n;
+        }
+
+        Ok((Self(Some(items)), size))
     }
 }
 

@@ -4,8 +4,9 @@ use anyhow::{bail, Context as _, Result};
 use tokio::net::TcpStream;
 
 use kafka::error::{ErrorCode, KafkaError};
+use kafka::request::{self, RequestBody, RequestMessage};
 use kafka::response::{self, ApiVersion, ResponseBody, ResponseHeader, ResponseMessage};
-use kafka::{ApiKey, HeaderVersion, MessageReader, MessageWriter, RequestMessage, WireSize as _};
+use kafka::{ApiKey, HeaderVersion, MessageReader, MessageWriter, WireSize as _};
 
 pub(crate) mod kafka;
 
@@ -57,8 +58,8 @@ async fn handle_message(msg: RequestMessage) -> Result<ResponseMessage> {
 
     let version = msg.header.request_api_version.into_inner();
 
-    let (body_size, body) = match msg.header.request_api_key {
-        ApiKey::ApiVersions => {
+    let (body_size, body) = match msg.body {
+        RequestBody::ApiVersions(_) => {
             let body = response::ApiVersions {
                 api_keys: ApiKey::iter().filter_map(ApiVersion::new).collect(),
                 ..Default::default()
@@ -67,20 +68,40 @@ async fn handle_message(msg: RequestMessage) -> Result<ResponseMessage> {
             (body.size(version), ResponseBody::ApiVersions(body))
         }
 
-        ApiKey::Fetch => {
+        RequestBody::Fetch(fetch) => {
+            use request::fetch::*;
+            use response::fetch::*;
+
             // TODO: actual impl
+            let responses = fetch
+                .topics
+                .into_iter()
+                .map(
+                    |FetchTopic {
+                         topic, topic_id, ..
+                     }| {
+                        let p = PartitionData::new(0, ErrorCode::UNKNOWN_TOPIC_ID, 0);
+
+                        FetchableTopicResponse {
+                            topic,
+                            topic_id,
+                            partitions: vec![p],
+                            tagged_fields: Default::default(),
+                        }
+                    },
+                )
+                .collect();
+
             let body = response::Fetch {
                 throttle_time_ms: 0,
                 error_code: ErrorCode::NONE,
                 session_id: 0,
-                responses: vec![],
+                responses,
                 ..Default::default()
             };
 
             (body.size(version), ResponseBody::Fetch(body))
         }
-
-        key => unimplemented!("message handling for {key:?}"),
     };
 
     // NOTE: response header version may depend on the API key/version

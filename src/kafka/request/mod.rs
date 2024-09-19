@@ -112,6 +112,5 @@ pub struct RequestMessage {
 #[derive(Debug)]
 pub enum RequestBody {
     ApiVersions(ApiVersions),
-    #[allow(dead_code)]
     Fetch(Fetch),
 }
