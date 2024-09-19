@@ -97,6 +97,146 @@ impl Deserialize for UnsignedVarInt {
     }
 }
 
+impl WireSize for Bytes {
+    const SIZE: usize = 4;
+
+    #[inline]
+    fn size(&self, _version: i16) -> usize {
+        Self::SIZE + self.len()
+    }
+}
+
+impl WireSize for Option<Bytes> {
+    const SIZE: usize = Bytes::SIZE;
+
+    #[inline]
+    fn size(&self, version: i16) -> usize {
+        self.as_ref().map_or(Self::SIZE, |b| b.size(version))
+    }
+}
+
+impl Serialize for Bytes {
+    async fn write_into<W>(self, writer: &mut W, _version: i16) -> Result<()>
+    where
+        W: AsyncWriteExt + Send + Unpin,
+    {
+        writer
+            .write_i32(self.len() as i32)
+            .await
+            .context("bytes length")?;
+
+        writer.write_all(&self).await.context("raw bytes")
+    }
+}
+
+impl Serialize for Option<Bytes> {
+    async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
+    where
+        W: AsyncWriteExt + Send + Unpin,
+    {
+        if let Some(bytes) = self {
+            bytes.write_into(writer, version).await
+        } else {
+            writer.write_i32(-1).await.context("bytes length")
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+#[repr(transparent)]
+pub struct CompactBytes(pub Bytes);
+
+impl CompactBytes {
+    pub(crate) fn enc_len(&self) -> UnsignedVarInt {
+        UnsignedVarInt((self.0.len() as u32) + 1)
+    }
+}
+
+impl WireSize for CompactBytes {
+    #[inline]
+    fn size(&self, version: i16) -> usize {
+        self.enc_len().size(version) + self.0.len()
+    }
+}
+
+impl WireSize for Option<CompactBytes> {
+    #[inline]
+    fn size(&self, version: i16) -> usize {
+        self.as_ref().map_or(1, |b| b.size(version))
+    }
+}
+
+impl Serialize for CompactBytes {
+    async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
+    where
+        W: AsyncWriteExt + Send + Unpin,
+    {
+        self.enc_len()
+            .write_into(writer, version)
+            .await
+            .context("compact bytes length")?;
+
+        writer.write_all(&self.0).await.context("compact bytes")
+    }
+}
+
+impl Serialize for Option<CompactBytes> {
+    async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
+    where
+        W: AsyncWriteExt + Send + Unpin,
+    {
+        if let Some(b) = self {
+            b.write_into(writer, version).await
+        } else {
+            UnsignedVarInt(0)
+                .write_into(writer, version)
+                .await
+                .context("compact bytes length")
+        }
+    }
+}
+
+// TODO: TryFrom<Bytes> to validate size
+/// UUID v4 bytes wrapper
+#[derive(Clone, Debug)]
+#[repr(transparent)]
+pub struct Uuid(Bytes);
+
+impl WireSize for Uuid {
+    const SIZE: usize = 16;
+
+    #[inline]
+    fn size(&self, _version: i16) -> usize {
+        Self::SIZE
+    }
+}
+
+impl Serialize for Uuid {
+    async fn write_into<W>(self, writer: &mut W, _version: i16) -> Result<()>
+    where
+        W: AsyncWriteExt + Send + Unpin,
+    {
+        writer.write_all(&self.0).await.context("UUID bytes")
+    }
+}
+
+/// [`Bytes`] wrapper that guarantees UTF-8 encoding.
+///
+/// Note that this is rather a helper type. For wire-serialized types use either [`Str`] or
+/// [`CompactStr`].
+#[derive(Clone, Debug)]
+#[repr(transparent)]
+pub struct StrBytes(Bytes);
+
+impl TryFrom<Bytes> for StrBytes {
+    type Error = anyhow::Error;
+
+    fn try_from(bytes: Bytes) -> Result<Self, Self::Error> {
+        std::str::from_utf8(&bytes).with_context(|| format!("invalid data: {bytes:x?}"))?;
+        Ok(Self(bytes))
+    }
+}
+
 /// STRING (`Str`)
 ///
 /// Represents a sequence of characters. First the length N is given as an INT16. Then N bytes
@@ -110,6 +250,20 @@ impl Deserialize for UnsignedVarInt {
 #[derive(Clone, Debug)]
 #[repr(transparent)]
 pub struct Str(Bytes);
+
+impl From<StrBytes> for Str {
+    #[inline]
+    fn from(StrBytes(bytes): StrBytes) -> Self {
+        Self(bytes)
+    }
+}
+
+impl From<&StrBytes> for Str {
+    #[inline]
+    fn from(s: &StrBytes) -> Self {
+        s.clone().into()
+    }
+}
 
 impl WireSize for Str {
     // length encoded as INT16
@@ -193,6 +347,73 @@ impl CompactStr {
     #[inline]
     pub(crate) fn empty() -> Self {
         Self(EMPTY)
+    }
+
+    #[inline]
+    pub(crate) fn enc_len(&self) -> UnsignedVarInt {
+        UnsignedVarInt((self.0.len() as u32) + 1)
+    }
+}
+
+impl From<StrBytes> for CompactStr {
+    #[inline]
+    fn from(StrBytes(bytes): StrBytes) -> Self {
+        Self(bytes)
+    }
+}
+
+impl From<&StrBytes> for CompactStr {
+    #[inline]
+    fn from(s: &StrBytes) -> Self {
+        s.clone().into()
+    }
+}
+
+// TODO: try to unify with impl WireSize for Str
+impl WireSize for CompactStr {
+    #[inline]
+    fn size(&self, version: i16) -> usize {
+        self.enc_len().size(version) + self.0.len()
+    }
+}
+
+impl WireSize for Option<CompactStr> {
+    #[inline]
+    fn size(&self, version: i16) -> usize {
+        self.as_ref().map_or(1, |s| s.size(version))
+    }
+}
+
+impl Serialize for CompactStr {
+    async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
+    where
+        W: AsyncWriteExt + Send + Unpin,
+    {
+        self.enc_len()
+            .write_into(writer, version)
+            .await
+            .context("compact string length")?;
+
+        writer
+            .write_all(&self.0)
+            .await
+            .context("compact string chars")
+    }
+}
+
+impl Serialize for Option<CompactStr> {
+    async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
+    where
+        W: AsyncWriteExt + Send + Unpin,
+    {
+        if let Some(s) = self {
+            s.write_into(writer, version).await
+        } else {
+            UnsignedVarInt(0)
+                .write_into(writer, version)
+                .await
+                .context("compact string lenght")
+        }
     }
 }
 
@@ -292,6 +513,13 @@ impl<T: WireSize> WireSize for Array<Option<&[T]>> {
     }
 }
 
+impl<T: WireSize> WireSize for Array<&Option<Vec<T>>> {
+    #[inline]
+    fn size(&self, version: i16) -> usize {
+        Array(self.0.as_ref().map(|array| array.as_slice())).size(version)
+    }
+}
+
 impl<T: Serialize> Serialize for Array<Vec<T>> {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
@@ -366,6 +594,13 @@ impl<T: WireSize> WireSize for CompactArray<Option<&[T]>> {
     #[inline]
     fn size(&self, version: i16) -> usize {
         self.0.map_or(1, |array| CompactArray(array).size(version))
+    }
+}
+
+impl<T: WireSize> WireSize for CompactArray<&Option<Vec<T>>> {
+    #[inline]
+    fn size(&self, version: i16) -> usize {
+        CompactArray(self.0.as_ref().map(|array| array.as_slice())).size(version)
     }
 }
 

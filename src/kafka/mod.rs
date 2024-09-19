@@ -74,6 +74,13 @@ where
                 RequestBody::ApiVersions(body)
             }
 
+            ApiKey::Fetch => {
+                let (body, _) = request::Fetch::read_from(&mut buf, api_version)
+                    .with_context(|| format!("{api_key:?} v{api_version} message body"))?;
+
+                RequestBody::Fetch(body)
+            }
+
             // NOTE: placeholder for unimplemented API requests
             api_key => {
                 bail!(KafkaError {

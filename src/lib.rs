@@ -67,6 +67,19 @@ async fn handle_message(msg: RequestMessage) -> Result<ResponseMessage> {
             (body.size(version), ResponseBody::ApiVersions(body))
         }
 
+        ApiKey::Fetch => {
+            // TODO: actual impl
+            let body = response::Fetch {
+                throttle_time_ms: 0,
+                error_code: ErrorCode::NONE,
+                session_id: 0,
+                responses: vec![],
+                ..Default::default()
+            };
+
+            (body.size(version), ResponseBody::Fetch(body))
+        }
+
         key => unimplemented!("message handling for {key:?}"),
     };
 
@@ -117,6 +130,12 @@ async fn handle_error(err: KafkaError) -> Result<ResponseMessage> {
             };
 
             (body.size(err.api_version), ResponseBody::ApiVersions(body))
+        }
+
+        ApiKey::Fetch => {
+            // TODO: throttle_time_ms, session_id for Fetch errors
+            let body = response::Fetch::error(0, err.error_code, 0);
+            (body.size(err.api_version), ResponseBody::Fetch(body))
         }
 
         key => unimplemented!("error handling for {key:?}"),
