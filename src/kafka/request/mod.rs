@@ -26,9 +26,11 @@ pub struct RequestHeader {
     // XXX: enum Since<T, const VERSION: i16> { Just(T), Nothing }
     //  - "unlock" by providing specific version or even based on a specific impl block
     /// A string identifying the client that sent the request. (API v1+)
+    #[allow(dead_code)]
     pub client_id: Option<Str>,
 
     /// Optional tagged fields. (API v2+)
+    #[allow(dead_code)]
     pub tagged_fields: TagBuffer,
 }
 
@@ -104,6 +106,7 @@ impl RequestHeader {
 
 #[derive(Debug)]
 pub struct RequestMessage {
+    #[allow(dead_code)]
     pub size: i32,
     pub header: RequestHeader,
     pub body: RequestBody,
@@ -111,6 +114,6 @@ pub struct RequestMessage {
 
 #[derive(Debug)]
 pub enum RequestBody {
-    ApiVersions(ApiVersions),
+    ApiVersions(#[allow(dead_code)] ApiVersions),
     Fetch(Fetch),
 }

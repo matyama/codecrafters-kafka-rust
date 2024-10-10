@@ -122,6 +122,8 @@ where
 
 pub trait Serialize: Sized {
     // TODO: parametrize by version
+    // TODO: resolve async_fn_in_trait lint and remove the allow
+    #[allow(async_fn_in_trait)]
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
         W: AsyncWriteExt + Send + Unpin;

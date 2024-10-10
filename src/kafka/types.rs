@@ -203,11 +203,17 @@ impl Serialize for Option<CompactBytes> {
     }
 }
 
-// TODO: TryFrom<Bytes> to validate size
 /// UUID v4 bytes wrapper
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialOrd, Ord, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct Uuid(Bytes);
+
+impl Uuid {
+    #[inline]
+    pub const fn from_static(bytes: &'static [u8; Self::SIZE]) -> Self {
+        Self(Bytes::from_static(bytes))
+    }
+}
 
 impl WireSize for Uuid {
     const SIZE: usize = 16;
@@ -234,11 +240,43 @@ impl Deserialize for Uuid {
     }
 }
 
+impl std::fmt::Display for Uuid {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for b in self.0.as_ref() {
+            write!(f, "{b:X}")?;
+        }
+        Ok(())
+    }
+}
+
+impl TryFrom<Bytes> for Uuid {
+    type Error = anyhow::Error;
+
+    fn try_from(bytes: Bytes) -> std::result::Result<Self, Self::Error> {
+        ensure!(
+            Self::SIZE == bytes.len(),
+            "UUID v4 has {}B, got {}B",
+            Self::SIZE,
+            bytes.len()
+        );
+        Ok(Self(bytes))
+    }
+}
+
+impl TryFrom<StrBytes> for Uuid {
+    type Error = anyhow::Error;
+
+    #[inline]
+    fn try_from(StrBytes(bytes): StrBytes) -> std::result::Result<Self, Self::Error> {
+        Self::try_from(bytes)
+    }
+}
+
 /// [`Bytes`] wrapper that guarantees UTF-8 encoding.
 ///
 /// Note that this is rather a helper type. For wire-serialized types use either [`Str`] or
 /// [`CompactStr`].
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct StrBytes(Bytes);
 
@@ -269,6 +307,17 @@ impl From<CompactStr> for StrBytes {
     #[inline]
     fn from(CompactStr(bytes): CompactStr) -> Self {
         Self(bytes)
+    }
+}
+
+impl TryFrom<&StrBytes> for u128 {
+    type Error = anyhow::Error;
+
+    fn try_from(StrBytes(s): &StrBytes) -> Result<Self, Self::Error> {
+        ensure!(s.len() >= 16, "cannot convert StrBytes into u128");
+        let mut bytes = [0; 16];
+        bytes.copy_from_slice(s);
+        Ok(u128::from_le_bytes(bytes))
     }
 }
 
@@ -683,7 +732,7 @@ impl<T: Serialize> Serialize for CompactArray<Vec<T>> {
         W: AsyncWriteExt + Send + Unpin,
     {
         ensure!(
-            self.len() < std::u32::MAX as usize,
+            self.len() < u32::MAX as usize,
             "exceeded max COMPACT_ARRAY size",
         );
 

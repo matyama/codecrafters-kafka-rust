@@ -6,9 +6,12 @@ use tokio::net::TcpStream;
 use kafka::error::{ErrorCode, KafkaError};
 use kafka::request::{self, RequestBody, RequestMessage};
 use kafka::response::{self, ApiVersion, ResponseBody, ResponseHeader, ResponseMessage};
+use kafka::types::Uuid;
 use kafka::{ApiKey, HeaderVersion, MessageReader, MessageWriter, WireSize as _};
 
-pub(crate) mod kafka;
+pub mod kafka;
+pub mod logs;
+pub mod properties;
 
 pub async fn handle_connection(mut conn: TcpStream) -> Result<()> {
     let (reader, writer) = conn.split();
@@ -72,24 +75,45 @@ async fn handle_message(msg: RequestMessage) -> Result<ResponseMessage> {
             use request::fetch::*;
             use response::fetch::*;
 
+            // TODO: test "known topic" based on current state / stored partition metadata
+            // NOTE: known topic is currently 00000000-0000-4000-0000-000000000000 and above
+            const KNOWN_TOPIC: Uuid =
+                Uuid::from_static(&[0, 0, 0, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0]);
+
+            let is_known_topic = |t: &FetchTopic| match version {
+                0..=12 => Uuid::try_from(t.topic.clone()).map_or(false, |t| t >= KNOWN_TOPIC),
+                _ => t.topic_id >= KNOWN_TOPIC,
+            };
+
             // TODO: actual impl
             let responses = fetch
                 .topics
                 .into_iter()
-                .map(
-                    |FetchTopic {
-                         topic, topic_id, ..
-                     }| {
-                        let p = PartitionData::new(0, ErrorCode::UNKNOWN_TOPIC_ID, 0);
+                .map(|t| {
+                    // TODO: optimize the formatting (no alloc)
+                    let offsets = t
+                        .partitions
+                        .iter()
+                        .map(|p| (p.partition, p.fetch_offset))
+                        .collect::<Vec<_>>();
 
-                        FetchableTopicResponse {
-                            topic,
-                            topic_id,
-                            partitions: vec![p],
-                            tagged_fields: Default::default(),
-                        }
-                    },
-                )
+                    println!("fetching {}: {:?}", t.topic_id, offsets);
+
+                    let error_code = if is_known_topic(&t) {
+                        ErrorCode::NONE
+                    } else {
+                        ErrorCode::UNKNOWN_TOPIC_ID
+                    };
+
+                    let p = PartitionData::new(0, error_code, 0);
+
+                    FetchableTopicResponse {
+                        topic: t.topic,
+                        topic_id: t.topic_id,
+                        partitions: vec![p],
+                        tagged_fields: Default::default(),
+                    }
+                })
                 .collect();
 
             let body = response::Fetch {

@@ -50,6 +50,7 @@ use crate::kafka::Deserialize;
 /// Version 17 adds directory id support from KIP-853
 ///
 /// [schema]: https://github.com/apache/kafka/blob/trunk/clients/src/main/resources/common/message/FetchRequest.json
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct Fetch {
     /// The clusterId if known. This is used to validate metadata fetches prior to broker
@@ -269,6 +270,7 @@ impl Deserialize for Fetch {
 }
 
 /// API v15+
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct ReplicaState {
     /// The replica ID of the follower, or -1 if this request is from a consumer.
@@ -319,9 +321,11 @@ pub struct FetchTopic {
     pub topic_id: Uuid,
 
     /// The partitions to fetch (API v0+)
+    #[allow(dead_code)]
     pub partitions: Vec<FetchPartition>,
 
     /// Other tagged fields (API v12+)
+    #[allow(dead_code)]
     pub tagged_fields: TagBuffer,
 }
 
@@ -387,6 +391,7 @@ impl Deserialize for FetchTopic {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct FetchPartition {
     /// The partition index. (API v0+)
@@ -477,6 +482,7 @@ impl Deserialize for FetchPartition {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Default)]
 pub struct ForgottenTopic {
     /// The topic name. (API v7-12)

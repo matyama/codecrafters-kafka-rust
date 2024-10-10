@@ -16,6 +16,7 @@ use crate::kafka::Deserialize;
 /// being 0.
 ///
 /// [schema]: https://github.com/apache/kafka/blob/trunk/clients/src/main/resources/common/message/ApiVersionsRequest.json
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct ApiVersions {
     // XXX: Since<Str, 3>

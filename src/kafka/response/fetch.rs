@@ -724,6 +724,7 @@ impl Serialize for AbortedTransaction {
 }
 
 /// API v16+
+#[allow(dead_code)]
 #[derive(Debug)]
 pub struct NodeEndpoint {
     // XXX: BrokerId
