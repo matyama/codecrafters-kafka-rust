@@ -41,28 +41,28 @@ async fn main() -> Result<()> {
             // handle connections
             conn = listener.accept() => match conn {
                 Ok((stream, addr)) => {
-                    println!("accepted new connection: {addr}");
+                    println!("Accepted new connection: {addr}");
 
                     stream.set_nodelay(true).context("enable TCP_NODELAY on connection")?;
 
                     task::spawn(async move {
                         if let Err(e) = handle_connection(stream).await {
-                            eprintln!("task handling connection failed with {e:?}");
+                            eprintln!("Task handling connection failed with {e:?}");
                         }
                     });
                 },
 
-                Err(e) => eprintln!("instance cannot get client: {e:?}"),
+                Err(e) => eprintln!("Instance cannot get client: {e:?}"),
             },
 
             // handle signals
             sig = signal::ctrl_c() => match sig {
                 Ok(()) => {
-                    println!("received SIGINT, shutting down...");
+                    println!("Received SIGINT, shutting down...");
                     break Ok(());
                 },
                 Err(e) => {
-                    eprintln!("terminating after error: {e}");
+                    eprintln!("Terminating after error: {e}");
                     break Err(e).context("failed while receiving an interrupt signal");
                 },
             }

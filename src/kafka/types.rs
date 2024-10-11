@@ -203,6 +203,23 @@ impl Serialize for Option<CompactBytes> {
     }
 }
 
+/// [`Uuid`] bytes wrapper for displaying in (lowercase) hexadecimal format.
+#[derive(Clone, Debug)]
+#[repr(transparent)]
+pub(crate) struct UuidHex<'a>(&'a [u8]);
+
+impl std::fmt::Display for UuidHex<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (i, b) in self.0.iter().enumerate() {
+            match i {
+                4 | 6 | 8 | 10 => write!(f, "-{b:02x}")?,
+                _ => write!(f, "{b:02x}")?,
+            }
+        }
+        Ok(())
+    }
+}
+
 /// UUID v4 bytes wrapper
 #[derive(Clone, Debug, Default, PartialOrd, Ord, PartialEq, Eq)]
 #[repr(transparent)]
@@ -212,6 +229,11 @@ impl Uuid {
     #[inline]
     pub const fn from_static(bytes: &'static [u8; Self::SIZE]) -> Self {
         Self(Bytes::from_static(bytes))
+    }
+
+    #[inline]
+    pub(crate) fn as_hex(&self) -> UuidHex<'_> {
+        UuidHex(&self.0)
     }
 }
 
@@ -241,11 +263,9 @@ impl Deserialize for Uuid {
 }
 
 impl std::fmt::Display for Uuid {
+    #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        for b in self.0.as_ref() {
-            write!(f, "{b:X}")?;
-        }
-        Ok(())
+        self.as_hex().fmt(f)
     }
 }
 

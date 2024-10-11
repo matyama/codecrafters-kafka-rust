@@ -4,7 +4,7 @@ use tokio::io::AsyncWriteExt;
 use crate::kafka::types::TagBuffer;
 use crate::kafka::{HeaderVersion, Serialize, WireSize};
 
-pub(crate) use api_versions::{ApiVersion, ApiVersions};
+pub(crate) use api_versions::ApiVersions;
 pub(crate) use fetch::Fetch;
 
 pub mod api_versions;

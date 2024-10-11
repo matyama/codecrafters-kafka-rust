@@ -15,6 +15,11 @@ pub struct ServerProperties {
 
 impl ServerProperties {
     pub async fn load(path: impl AsRef<Path>) -> Result<Self> {
+        println!("Loading {:?}", path.as_ref());
+
+        // XXX: debug print
+        //crate::utils::hexdump(&path).await?;
+
         let file = fs::File::open(path).await?;
 
         let mut reader = BufReader::new(file);

@@ -31,6 +31,17 @@ pub async fn load_metadata(log_dirs: impl IntoIterator<Item = PathBuf>) -> Resul
     Ok(dirs)
 }
 
+// TODO: implement load_logs()
+//  - https://jaceklaskowski.gitbooks.io/apache-kafka/content/kafka-log-LogManager.html
+//  - check for .kafka_cleanshutdown next to meta.properties (i.e., in the LogDir)
+//
+// `loadLogs` then checks whether .kafka_cleanshutdown file exists in the log directory. If so,
+// `loadLogs` prints out the following DEBUG message to the logs:
+//
+// ```
+// Found clean shutdown file. Skipping recovery for all logs in data directory: [dir]
+// ```
+
 #[allow(dead_code)]
 #[derive(Debug)]
 pub struct MetaProperties {
@@ -43,6 +54,10 @@ pub struct MetaProperties {
 impl MetaProperties {
     pub async fn load(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
+        println!("Loading {path:?}");
+
+        // XXX: debug print
+        //crate::utils::hexdump(&path).await?;
 
         let file = fs::File::open(&path)
             .await
@@ -114,6 +129,7 @@ pub struct LogDir {
     pub path: PathBuf,
     pub meta: MetaProperties,
     pub partitions: Vec<PartitionDir>,
+    pub kafka_cleanshutdown: Option<PathBuf>,
 }
 
 impl LogDir {
@@ -125,6 +141,7 @@ impl LogDir {
 
         let mut meta = None;
         let mut partitions = Vec::new();
+        let mut kafka_cleanshutdown = None;
 
         while let Some(entry) = reader.next_entry().await? {
             let path = entry.path();
@@ -146,6 +163,10 @@ impl LogDir {
                         meta.replace(meta_properties);
                     }
 
+                    b".kafka_cleanshutdown" => {
+                        let _ = kafka_cleanshutdown.replace(entry.path());
+                    }
+
                     _ => continue,
                 }
             }
@@ -159,11 +180,20 @@ impl LogDir {
             }
         }
 
+        // TODO: move to load_logs()
+        if kafka_cleanshutdown.is_some() {
+            println!(
+                "Found clean shutdown file. \
+                Skipping recovery for all logs in data directory: {path:?}"
+            );
+        }
+
         // XXX: defaults if missing?
         Ok(Self {
             path,
             meta: meta.context("missing meta.properties")?,
             partitions,
+            kafka_cleanshutdown,
         })
     }
 }

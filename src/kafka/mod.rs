@@ -1,3 +1,5 @@
+use std::io::ErrorKind;
+
 use anyhow::{bail, ensure, Context as _, Result};
 use bytes::{Buf, BytesMut};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
@@ -45,8 +47,18 @@ where
         }
     }
 
-    pub async fn read_request(&mut self) -> Result<RequestMessage> {
-        let size = self.inner.read_i32().await.context("message size")?;
+    pub async fn read_request(&mut self) -> Result<Option<RequestMessage>> {
+        // read message size in bytes
+        let size = match self.inner.read_i32().await {
+            Ok(size) => size,
+
+            // if the input ends at message boundary, return successfully without a message
+            Err(e) if matches!(e.kind(), ErrorKind::UnexpectedEof) => return Ok(None),
+
+            // propagate error
+            Err(e) => return Err(e).context("message size"),
+        };
+
         ensure!(size > 0, "received a zero-sized message");
 
         // TODO: let caller provide their own buffer (owned) and let the message point into it
@@ -92,7 +104,7 @@ where
             }
         };
 
-        Ok(RequestMessage { size, header, body })
+        Ok(Some(RequestMessage { size, header, body }))
     }
 }
 

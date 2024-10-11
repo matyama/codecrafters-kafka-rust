@@ -3,12 +3,13 @@ use std::ops::ControlFlow;
 use anyhow::{bail, Context as _, Result};
 use tokio::net::TcpStream;
 
-use kafka::error::{ErrorCode, KafkaError};
-use kafka::request::{self, RequestBody, RequestMessage};
-use kafka::response::{self, ApiVersion, ResponseBody, ResponseHeader, ResponseMessage};
-use kafka::types::Uuid;
+use handler::Handler;
+use kafka::error::KafkaError;
+use kafka::request::{RequestBody, RequestMessage};
+use kafka::response::{ResponseHeader, ResponseMessage};
 use kafka::{ApiKey, HeaderVersion, MessageReader, MessageWriter, WireSize as _};
 
+pub mod handler;
 pub mod kafka;
 pub mod logs;
 pub mod properties;
@@ -23,8 +24,11 @@ pub async fn handle_connection(mut conn: TcpStream) -> Result<()> {
         let msg = reader.read_request().await.context("read request");
 
         let (msg, version, control) = match msg {
+            // connection disconnected
+            Ok(None) => break Ok(()),
+
             // request handling
-            Ok(msg) => {
+            Ok(Some(msg)) => {
                 let version = msg.header.request_api_version.into_inner();
                 let msg = handle_message(msg).await.context("handle message")?;
                 (msg, version, ControlFlow::Continue(()))
@@ -41,7 +45,7 @@ pub async fn handle_connection(mut conn: TcpStream) -> Result<()> {
             },
         };
 
-        println!("response: {msg:?}");
+        println!("Response: {msg:?}");
         writer
             .write_response(msg, version)
             .await
@@ -57,79 +61,28 @@ pub async fn handle_connection(mut conn: TcpStream) -> Result<()> {
 }
 
 async fn handle_message(msg: RequestMessage) -> Result<ResponseMessage> {
-    println!("handling: {msg:?}");
+    println!("Handling: {msg:?}");
 
-    let version = msg.header.request_api_version.into_inner();
+    let api_key = msg.header.request_api_key;
+    let api_version = msg.header.request_api_version.into_inner();
 
     let (body_size, body) = match msg.body {
-        RequestBody::ApiVersions(_) => {
-            let body = response::ApiVersions {
-                api_keys: ApiKey::iter().filter_map(ApiVersion::new).collect(),
-                ..Default::default()
-            };
-
-            (body.size(version), ResponseBody::ApiVersions(body))
+        RequestBody::ApiVersions(body) => {
+            handler::ApiVersionsHandler
+                .handle_message(&msg.header, body)
+                .await
         }
 
-        RequestBody::Fetch(fetch) => {
-            use request::fetch::*;
-            use response::fetch::*;
-
-            // TODO: test "known topic" based on current state / stored partition metadata
-            // NOTE: known topic is currently 00000000-0000-4000-0000-000000000000 and above
-            const KNOWN_TOPIC: Uuid =
-                Uuid::from_static(&[0, 0, 0, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0]);
-
-            let is_known_topic = |t: &FetchTopic| match version {
-                0..=12 => Uuid::try_from(t.topic.clone()).map_or(false, |t| t >= KNOWN_TOPIC),
-                _ => t.topic_id >= KNOWN_TOPIC,
-            };
-
-            // TODO: actual impl
-            let responses = fetch
-                .topics
-                .into_iter()
-                .map(|t| {
-                    // TODO: optimize the formatting (no alloc)
-                    let offsets = t
-                        .partitions
-                        .iter()
-                        .map(|p| (p.partition, p.fetch_offset))
-                        .collect::<Vec<_>>();
-
-                    println!("fetching {}: {:?}", t.topic_id, offsets);
-
-                    let error_code = if is_known_topic(&t) {
-                        ErrorCode::NONE
-                    } else {
-                        ErrorCode::UNKNOWN_TOPIC_ID
-                    };
-
-                    let p = PartitionData::new(0, error_code, 0);
-
-                    FetchableTopicResponse {
-                        topic: t.topic,
-                        topic_id: t.topic_id,
-                        partitions: vec![p],
-                        tagged_fields: Default::default(),
-                    }
-                })
-                .collect();
-
-            let body = response::Fetch {
-                throttle_time_ms: 0,
-                error_code: ErrorCode::NONE,
-                session_id: 0,
-                responses,
-                ..Default::default()
-            };
-
-            (body.size(version), ResponseBody::Fetch(body))
+        RequestBody::Fetch(body) => {
+            handler::FetchHandler
+                .handle_message(&msg.header, body)
+                .await
         }
-    };
+    }
+    .with_context(|| format!("handle {api_key:?} v{api_version} request"))?;
 
     // NOTE: response header version may depend on the API key/version
-    let header_version = body.header_version(version);
+    let header_version = body.header_version(api_version);
 
     let header = ResponseHeader {
         correlation_id: msg.header.correlation_id,
@@ -145,7 +98,10 @@ async fn handle_message(msg: RequestMessage) -> Result<ResponseMessage> {
 }
 
 async fn handle_error(err: KafkaError) -> Result<ResponseMessage> {
-    println!("handling: {err:?}");
+    println!("Handling: {err:?}");
+
+    let api_version = err.api_version;
+    let correlation_id = err.correlation_id;
 
     let Ok(api_key) = ApiKey::try_from(err.api_key) else {
         bail!(
@@ -157,40 +113,21 @@ async fn handle_error(err: KafkaError) -> Result<ResponseMessage> {
         );
     };
 
+    // NOTE: `handler: impl Handler` is not (yet) allowed, so we must live with a bit of code dup.
     let (body_size, body) = match api_key {
-        ApiKey::ApiVersions => {
-            // Starting from Apache Kafka 2.4 (KIP-511), ApiKeys field is populated with the
-            // supported versions of the ApiVersionsRequest when an UNSUPPORTED_VERSION error is
-            // returned.
-            let body = match err.error_code {
-                error_code @ ErrorCode::UNSUPPORTED_VERSION => response::ApiVersions {
-                    error_code,
-                    api_keys: [api_key].into_iter().filter_map(ApiVersion::new).collect(),
-                    ..Default::default()
-                },
-                error_code => response::ApiVersions {
-                    error_code,
-                    ..Default::default()
-                },
-            };
+        ApiKey::ApiVersions => handler::ApiVersionsHandler.handle_error(err).await,
 
-            (body.size(err.api_version), ResponseBody::ApiVersions(body))
-        }
+        ApiKey::Fetch => handler::FetchHandler.handle_error(err).await,
 
-        ApiKey::Fetch => {
-            // TODO: throttle_time_ms, session_id for Fetch errors
-            let body = response::Fetch::error(0, err.error_code, 0);
-            (body.size(err.api_version), ResponseBody::Fetch(body))
-        }
-
-        key => unimplemented!("error handling for {key:?}"),
-    };
+        key => unimplemented!("error handling for {key:?} v{api_version}"),
+    }
+    .with_context(|| format!("handle {api_key:?} v{api_version} error"))?;
 
     // NOTE: response header version may depend on the API key/version
-    let header_version = body.header_version(err.api_version);
+    let header_version = body.header_version(api_version);
 
     let header = ResponseHeader {
-        correlation_id: err.correlation_id,
+        correlation_id,
         // TODO: TAG_BUFFER
         tagged_fields: Default::default(),
     };
@@ -200,4 +137,30 @@ async fn handle_error(err: KafkaError) -> Result<ResponseMessage> {
         header,
         body,
     })
+}
+
+pub(crate) mod utils {
+    use std::fmt::Write as _;
+    use std::path::Path;
+
+    use anyhow::{Context as _, Result};
+
+    #[allow(dead_code)]
+    pub async fn hexdump(path: impl AsRef<Path>) -> Result<()> {
+        let path = path.as_ref();
+
+        let data = tokio::fs::read(&path)
+            .await
+            .with_context(|| format!("read {path:?}"))?;
+
+        let mut hexdump = String::new();
+
+        write!(&mut hexdump, "{data:02x?}").with_context(|| format!("hexdump {path:?}"))?;
+
+        hexdump.retain(char::is_alphanumeric);
+
+        println!("{path:?}: {hexdump}");
+
+        Ok(())
+    }
 }

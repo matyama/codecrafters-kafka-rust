@@ -18,6 +18,19 @@ impl PartitionDir {
             .await
             .with_context(|| format!("failed to read {meta_path:?}"))?;
 
+        // XXX: dump log files
+        /*
+        let mut reader = fs::read_dir(&path)
+            .await
+            .with_context(|| format!("reading directory {path:?}"))?;
+
+        while let Some(entry) = reader.next_entry().await? {
+            if entry.file_name().as_encoded_bytes().ends_with(b".log") {
+                crate::utils::hexdump(entry.path()).await?;
+            }
+        }
+        */
+
         Ok(Self { path, meta })
     }
 }
@@ -32,6 +45,10 @@ pub struct PartitionMetadata {
 impl PartitionMetadata {
     pub async fn load(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
+        println!("Loading {path:?}");
+
+        // XXX: debug print
+        //crate::utils::hexdump(&path).await?;
 
         let file = fs::File::open(&path)
             .await
