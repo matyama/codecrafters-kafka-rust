@@ -1,12 +1,11 @@
-use std::collections::{BTreeMap, HashMap};
-use std::ops::Deref;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context as _, Result};
 use bytes::Bytes;
 use tokio::fs::{self, File};
 use tokio::io::AsyncReadExt as _;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, MutexGuard, RwLock};
 use tokio::task::JoinSet;
 
 use crate::kafka::record::{self, Topic};
@@ -21,22 +20,30 @@ struct TopicPartition {
 }
 
 #[derive(Debug)]
-#[repr(transparent)]
-struct LogFile(Mutex<File>);
+struct LogFile {
+    /// min offset of the log file (also contained in the file name)
+    offset: i64,
+    /// open log file
+    file: Mutex<File>,
+}
 
 impl LogFile {
     #[inline]
-    fn new(file: File) -> Self {
-        Self(Mutex::new(file))
+    fn new(offset: i64, file: File) -> Self {
+        Self {
+            offset,
+            file: Mutex::new(file),
+        }
     }
-}
-
-impl Deref for LogFile {
-    type Target = Mutex<File>;
 
     #[inline]
-    fn deref(&self) -> &Self::Target {
-        &self.0
+    fn offset(&self) -> i64 {
+        self.offset
+    }
+
+    #[inline]
+    async fn lock(&self) -> MutexGuard<'_, File> {
+        self.file.lock().await
     }
 }
 
@@ -46,8 +53,8 @@ struct PartitionIndex {
     //partition: i32,
     /// path to the partition directory
     dir: PathBuf,
-    /// base offset -> log file
-    logs: BTreeMap<i64, LogFile>,
+    /// vector of (base offset, log file) pairs, sorted by the offset (asc)
+    logs: Vec<LogFile>,
 }
 
 impl PartitionIndex {
@@ -57,8 +64,14 @@ impl PartitionIndex {
             //topic: topic.clone(),
             //partition,
             dir: dir.as_ref().to_path_buf(),
-            logs: BTreeMap::new(),
+            logs: Vec::new(),
         }
+    }
+
+    #[inline]
+    fn lookup_file(&self, offset: i64) -> Option<&LogFile> {
+        let (Ok(ix) | Err(ix)) = self.logs.binary_search_by_key(&offset, LogFile::offset);
+        self.logs.get(ix)
     }
 }
 
@@ -100,14 +113,6 @@ impl Storage {
         Ok(Self { inner })
     }
 
-    #[inline]
-    pub async fn contains(&self, topic: Uuid, partition: i32) -> bool {
-        let storage = self.inner.read().await;
-        storage
-            .log_index
-            .contains_key(&TopicPartition { topic, partition })
-    }
-
     // XXX: add version?
     pub async fn fetch_records(
         &self,
@@ -123,7 +128,7 @@ impl Storage {
             return Ok(FetchResult::UnknownTopic);
         };
 
-        let Some(log_file) = ix.logs.get(&offset) else {
+        let Some(log_file) = ix.lookup_file(offset) else {
             return Ok(FetchResult::OffsetOutOfRange);
         };
 
@@ -205,6 +210,9 @@ async fn index_partition(index: &mut PartitionIndex) -> Result<()> {
         .await
         .context("failed to read partition dir")?;
 
+    let mut needs_sorting = false;
+    let mut prev_offset = -1;
+
     while let Some(entry) = dir.next_entry().await.context("next dir entry")? {
         let path = entry.path();
         if let Some("log") = path.extension().and_then(|ext| ext.to_str()) {
@@ -227,11 +235,17 @@ async fn index_partition(index: &mut PartitionIndex) -> Result<()> {
                 .write(true)
                 .open(path)
                 .await
-                .map(LogFile::new)
                 .context("failed to open log file")?;
 
-            index.logs.insert(base_offset, log_file);
+            index.logs.push(LogFile::new(base_offset, log_file));
+
+            needs_sorting &= prev_offset < base_offset;
+            prev_offset = base_offset;
         }
+    }
+
+    if needs_sorting {
+        index.logs.sort_unstable_by_key(LogFile::offset);
     }
 
     Ok(())
