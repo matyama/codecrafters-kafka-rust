@@ -1,14 +1,13 @@
 use std::env;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
 use tokio::net::TcpListener;
 use tokio::signal;
 use tokio::task;
 
-use redis_starter_rust::handle_connection;
-use redis_starter_rust::logs;
-use redis_starter_rust::properties::ServerProperties;
+use redis_starter_rust::Server;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -17,20 +16,10 @@ async fn main() -> Result<()> {
         .map(PathBuf::from)
         .context("missing required server.properties argument")?;
 
-    // TODO: separate storage layer from the properties structure
-    //  - `ServerProperties::load` and similar should take an abstract async reader, not a fs path
-    let server_properties = ServerProperties::load(&server_properties)
+    let server = Server::new(server_properties)
         .await
-        .with_context(|| format!("parse {server_properties:?}"))?;
-
-    println!("Loaded {server_properties:?}");
-
-    let log_dirs = server_properties.log_dirs.iter().cloned();
-    let log_dirs = logs::load_metadata(log_dirs)
-        .await
-        .context("reading log directory metadata")?;
-
-    println!("Found log dir metadata {log_dirs:?}");
+        .map(Arc::new)
+        .context("initialize server")?;
 
     let listener = TcpListener::bind("127.0.0.1:9092")
         .await
@@ -45,8 +34,10 @@ async fn main() -> Result<()> {
 
                     stream.set_nodelay(true).context("enable TCP_NODELAY on connection")?;
 
+                    let server = Arc::clone(&server);
+
                     task::spawn(async move {
-                        if let Err(e) = handle_connection(stream).await {
+                        if let Err(e) = server.handle_connection(stream).await {
                             eprintln!("Task handling connection failed with {e:?}");
                         }
                     });

@@ -354,6 +354,12 @@ impl PartitionData {
             tagged_fields: TagBuffer::default(),
         }
     }
+
+    #[inline]
+    pub fn with_records(mut self, records: Option<Bytes>) -> Self {
+        self.records = records;
+        self
+    }
 }
 
 impl WireSize for PartitionData {

@@ -329,6 +329,15 @@ pub struct FetchTopic {
     pub tagged_fields: TagBuffer,
 }
 
+impl FetchTopic {
+    pub(crate) fn topic_id(&self, version: i16) -> Option<Uuid> {
+        match version {
+            0..=12 => Uuid::try_from(self.topic.clone()).ok(),
+            _ => Some(self.topic_id.clone()),
+        }
+    }
+}
+
 impl Deserialize for FetchTopic {
     fn read_from<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
         let mut size = 0;

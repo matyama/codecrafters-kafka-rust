@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 
 use anyhow::{bail, ensure, Context as _, Result};
-use bytes::{Buf, Bytes};
-use tokio::io::AsyncWriteExt;
+use bytes::{Buf, Bytes, BytesMut};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::kafka::{Deserialize, Serialize, WireSize};
+use crate::kafka::{AsyncDeserialize, Deserialize, Serialize, WireSize};
 
 const EMPTY: Bytes = Bytes::from_static(&[]);
 
@@ -38,10 +38,156 @@ impl Deserialize for bool {
     }
 }
 
+impl AsyncDeserialize for bool {
+    async fn read<R>(reader: &mut R, _version: i16) -> Result<(Self, usize)>
+    where
+        R: AsyncReadExt + Send + Unpin,
+    {
+        Ok((reader.read_u8().await? > 0, 1))
+    }
+}
+
+// TODO: deduplicate these primitive impls via a macro
+impl Deserialize for i8 {
+    fn read_from<B: Buf>(buf: &mut B, _version: i16) -> Result<(Self, usize)> {
+        ensure!(buf.remaining() >= 1, "not enough bytes left");
+        Ok((buf.get_i8(), 1))
+    }
+}
+
+impl AsyncDeserialize for i8 {
+    async fn read<R>(reader: &mut R, _version: i16) -> Result<(Self, usize)>
+    where
+        R: AsyncReadExt + Send + Unpin,
+    {
+        Ok((reader.read_i8().await?, 1))
+    }
+}
+
+impl Deserialize for i16 {
+    fn read_from<B: Buf>(buf: &mut B, _version: i16) -> Result<(Self, usize)> {
+        ensure!(buf.remaining() >= 2, "not enough bytes left");
+        Ok((buf.get_i16(), 2))
+    }
+}
+
+impl AsyncDeserialize for i16 {
+    async fn read<R>(reader: &mut R, _version: i16) -> Result<(Self, usize)>
+    where
+        R: AsyncReadExt + Send + Unpin,
+    {
+        Ok((reader.read_i16().await?, 2))
+    }
+}
+
+impl Deserialize for u32 {
+    fn read_from<B: Buf>(buf: &mut B, _version: i16) -> Result<(Self, usize)> {
+        ensure!(buf.remaining() >= 4, "not enough bytes left");
+        Ok((buf.get_u32(), 4))
+    }
+}
+
+impl AsyncDeserialize for u32 {
+    async fn read<R>(reader: &mut R, _version: i16) -> Result<(Self, usize)>
+    where
+        R: AsyncReadExt + Send + Unpin,
+    {
+        Ok((reader.read_u32().await?, 4))
+    }
+}
+
 impl Deserialize for i32 {
     fn read_from<B: Buf>(buf: &mut B, _version: i16) -> Result<(Self, usize)> {
         ensure!(buf.remaining() >= 4, "not enough bytes left");
         Ok((buf.get_i32(), 4))
+    }
+}
+
+impl AsyncDeserialize for i32 {
+    async fn read<R>(reader: &mut R, _version: i16) -> Result<(Self, usize)>
+    where
+        R: AsyncReadExt + Send + Unpin,
+    {
+        Ok((reader.read_i32().await?, 4))
+    }
+}
+
+impl Deserialize for i64 {
+    fn read_from<B: Buf>(buf: &mut B, _version: i16) -> Result<(Self, usize)> {
+        ensure!(buf.remaining() >= 8, "not enough bytes left");
+        Ok((buf.get_i64(), 8))
+    }
+}
+
+impl AsyncDeserialize for i64 {
+    async fn read<R>(reader: &mut R, _version: i16) -> Result<(Self, usize)>
+    where
+        R: AsyncReadExt + Send + Unpin,
+    {
+        Ok((reader.read_i64().await?, 8))
+    }
+}
+
+/// VARINT
+///
+/// Represents a 32-bit integer. Encoding follows the variable-length zig-zag encoding from Google
+/// Protocol Buffers.
+#[derive(Debug, Copy, Clone, Default)]
+#[repr(transparent)]
+pub struct VarInt(pub(crate) i32);
+
+impl WireSize for VarInt {
+    #[inline]
+    fn size(&self, version: i16) -> usize {
+        UnsignedVarInt::from(*self).size(version)
+    }
+}
+
+impl Serialize for VarInt {
+    async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
+    where
+        W: AsyncWriteExt + Send + Unpin,
+    {
+        UnsignedVarInt::from(self).write_into(writer, version).await
+    }
+}
+
+impl Deserialize for VarInt {
+    fn read_from<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
+        UnsignedVarInt::read_from(buf, version).map(|(zigzag, bytes)| (Self::from(zigzag), bytes))
+    }
+}
+
+impl AsyncDeserialize for VarInt {
+    async fn read<R>(reader: &mut R, version: i16) -> Result<(Self, usize)>
+    where
+        R: AsyncReadExt + Send + Unpin,
+    {
+        let (zigzag, bytes) = UnsignedVarInt::read(reader, version).await?;
+        Ok((Self::from(zigzag), bytes))
+    }
+}
+
+impl From<UnsignedVarInt> for VarInt {
+    #[inline]
+    fn from(UnsignedVarInt(zigzag): UnsignedVarInt) -> Self {
+        Self(((zigzag >> 1) as i32) ^ (-((zigzag & 1) as i32)))
+    }
+}
+
+impl From<VarInt> for UnsignedVarInt {
+    #[inline]
+    fn from(VarInt(value): VarInt) -> Self {
+        Self(((value << 1) ^ (value >> 31)) as u32)
+    }
+}
+
+impl TryFrom<VarInt> for usize {
+    type Error = anyhow::Error;
+
+    fn try_from(VarInt(i): VarInt) -> Result<Self> {
+        ensure!(i >= 0, "VARINT {i} cannot be converted to usize");
+        Ok(i as usize)
     }
 }
 
@@ -94,6 +240,164 @@ impl Deserialize for UnsignedVarInt {
         for i in 0..5 {
             ensure!(buf.has_remaining(), "not enough bytes left");
             let b = buf.get_u8() as u32;
+            value |= (b & 0x7F) << (i * 7);
+            bytes += 1;
+            if b < 0x80 {
+                break;
+            }
+        }
+        Ok((Self(value), bytes))
+    }
+}
+
+impl AsyncDeserialize for UnsignedVarInt {
+    async fn read<R>(reader: &mut R, _version: i16) -> Result<(Self, usize)>
+    where
+        R: AsyncReadExt + Send + Unpin,
+    {
+        let mut value = 0;
+        let mut bytes = 0;
+        for i in 0..5 {
+            let b = reader.read_u8().await? as u32;
+            value |= (b & 0x7F) << (i * 7);
+            bytes += 1;
+            if b < 0x80 {
+                break;
+            }
+        }
+        Ok((Self(value), bytes))
+    }
+}
+
+/// VARLONG
+///
+/// Represents a 64-bit integer. Encoding follows the variable-length zig-zag encoding from Google
+/// Protocol Buffers.
+#[derive(Debug, Copy, Clone, Default)]
+#[repr(transparent)]
+pub struct VarLong(pub(crate) i64);
+
+impl WireSize for VarLong {
+    #[inline]
+    fn size(&self, version: i16) -> usize {
+        UnsignedVarLong::from(*self).size(version)
+    }
+}
+
+impl Serialize for VarLong {
+    async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
+    where
+        W: AsyncWriteExt + Send + Unpin,
+    {
+        UnsignedVarLong::from(self)
+            .write_into(writer, version)
+            .await
+    }
+}
+
+impl Deserialize for VarLong {
+    fn read_from<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
+        UnsignedVarLong::read_from(buf, version).map(|(zigzag, bytes)| (Self::from(zigzag), bytes))
+    }
+}
+
+impl AsyncDeserialize for VarLong {
+    async fn read<R>(reader: &mut R, version: i16) -> Result<(Self, usize)>
+    where
+        R: AsyncReadExt + Send + Unpin,
+    {
+        let (zigzag, bytes) = UnsignedVarLong::read(reader, version).await?;
+        Ok((Self::from(zigzag), bytes))
+    }
+}
+
+impl From<UnsignedVarLong> for VarLong {
+    #[inline]
+    fn from(UnsignedVarLong(zigzag): UnsignedVarLong) -> Self {
+        Self(((zigzag >> 1) as i64) ^ (-((zigzag & 1) as i64)))
+    }
+}
+
+impl From<VarLong> for UnsignedVarLong {
+    #[inline]
+    fn from(VarLong(value): VarLong) -> Self {
+        Self(((value << 1) ^ (value >> 63)) as u64)
+    }
+}
+
+/// UNSIGNED_VARLONG
+///
+/// Represents an unsigned 64-bit integer. Encoding follows the variable-length zig-zag encoding
+/// from Google Protocol Buffers.
+#[derive(Debug, Copy, Clone, Default)]
+#[repr(transparent)]
+pub struct UnsignedVarLong(u64);
+
+impl WireSize for UnsignedVarLong {
+    fn size(&self, _version: i16) -> usize {
+        match self.0 {
+            0x0..=0x7f => 1,
+            0x80..=0x3fff => 2,
+            0x4000..=0x1fffff => 3,
+            0x200000..=0xfffffff => 4,
+            0x10000000..=0x7ffffffff => 5,
+            0x800000000..=0x3ffffffffff => 6,
+            0x40000000000..=0x1ffffffffffff => 7,
+            0x2000000000000..=0xffffffffffffff => 8,
+            0x100000000000000..=0x7fffffffffffffff => 9,
+            0x8000000000000000..=0xffffffffffffffff => 10,
+        }
+    }
+}
+
+impl Serialize for UnsignedVarLong {
+    async fn write_into<W>(self, writer: &mut W, _version: i16) -> Result<()>
+    where
+        W: AsyncWriteExt + Send + Unpin,
+    {
+        // TODO: use local [0; MAX_SIZE] buf and write just once
+
+        let mut value = self.0;
+
+        while value >= 0x80 {
+            // buf.write_u8(...)
+            writer.write_u8((value as u8) | 0x80).await?;
+            value >>= 7;
+        }
+
+        // buf.write_u8(...)
+        writer.write_u8(value as u8).await?;
+
+        Ok(())
+    }
+}
+
+impl Deserialize for UnsignedVarLong {
+    fn read_from<B: Buf>(buf: &mut B, _version: i16) -> Result<(Self, usize)> {
+        let mut value = 0;
+        let mut bytes = 0;
+        for i in 0..10 {
+            ensure!(buf.has_remaining(), "not enough bytes left");
+            let b = buf.get_u8() as u64;
+            value |= (b & 0x7F) << (i * 7);
+            bytes += 1;
+            if b < 0x80 {
+                break;
+            }
+        }
+        Ok((Self(value), bytes))
+    }
+}
+
+impl AsyncDeserialize for UnsignedVarLong {
+    async fn read<R>(reader: &mut R, _version: i16) -> Result<(Self, usize)>
+    where
+        R: AsyncReadExt + Send + Unpin,
+    {
+        let mut value = 0;
+        let mut bytes = 0;
+        for i in 0..10 {
+            let b = reader.read_u8().await? as u64;
             value |= (b & 0x7F) << (i * 7);
             bytes += 1;
             if b < 0x80 {
@@ -221,7 +525,7 @@ impl std::fmt::Display for UuidHex<'_> {
 }
 
 /// UUID v4 bytes wrapper
-#[derive(Clone, Debug, Default, PartialOrd, Ord, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialOrd, Ord, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub struct Uuid(Bytes);
 
@@ -262,6 +566,20 @@ impl Deserialize for Uuid {
     }
 }
 
+impl AsyncDeserialize for Uuid {
+    async fn read<R>(reader: &mut R, _version: i16) -> Result<(Self, usize)>
+    where
+        R: AsyncReadExt + Send + Unpin,
+    {
+        let mut buf = BytesMut::with_capacity(16);
+        buf.resize(16, 0);
+
+        let bytes = reader.read_exact(&mut buf).await?;
+
+        Ok((Self(buf.freeze()), bytes))
+    }
+}
+
 impl std::fmt::Display for Uuid {
     #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -299,6 +617,14 @@ impl TryFrom<StrBytes> for Uuid {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct StrBytes(Bytes);
+
+impl StrBytes {
+    #[inline]
+    pub fn as_str(&self) -> &str {
+        // SAFETY: StrBytes as UTF-8 encoded by construction
+        unsafe { std::str::from_utf8_unchecked(&self.0) }
+    }
+}
 
 impl TryFrom<Bytes> for StrBytes {
     type Error = anyhow::Error;
@@ -452,6 +778,45 @@ impl Deserialize for Option<Str> {
     }
 }
 
+impl AsyncDeserialize for Str {
+    async fn read<R>(reader: &mut R, version: i16) -> Result<(Self, usize)>
+    where
+        R: AsyncReadExt + Send + Unpin,
+    {
+        let (Some(s), len) = <Option<Str>>::read(reader, version).await? else {
+            bail!("empty string");
+        };
+        Ok((s, len))
+    }
+}
+
+impl AsyncDeserialize for Option<Str> {
+    async fn read<R>(reader: &mut R, _version: i16) -> Result<(Self, usize)>
+    where
+        R: AsyncReadExt + Send + Unpin,
+    {
+        let len = reader.read_i16().await?;
+
+        Ok(if len > 0 {
+            let len = len as usize;
+
+            let mut buf = BytesMut::with_capacity(len);
+            buf.resize(len, 0);
+
+            reader.read_exact(&mut buf).await?;
+
+            let bytes = buf.freeze();
+
+            // validate UTF-8
+            std::str::from_utf8(&bytes).with_context(|| format!("invalid data: {bytes:x?}"))?;
+
+            (Some(Str(bytes)), 2 + len)
+        } else {
+            (None, 2)
+        })
+    }
+}
+
 #[derive(Clone, Debug)]
 #[repr(transparent)]
 pub struct CompactStr(Bytes);
@@ -547,6 +912,31 @@ impl Deserialize for CompactStr {
     }
 }
 
+impl AsyncDeserialize for CompactStr {
+    async fn read<R>(reader: &mut R, version: i16) -> Result<(Self, usize)>
+    where
+        R: AsyncReadExt + Send + Unpin,
+    {
+        let (UnsignedVarInt(len), n) = UnsignedVarInt::read(reader, version)
+            .await
+            .context("compact string length")?;
+
+        let len = (len - 1) as usize;
+
+        let mut buf = BytesMut::with_capacity(len);
+        buf.resize(len, 0);
+
+        reader.read_exact(&mut buf).await?;
+
+        let bytes = buf.freeze();
+
+        // validate UTF-8
+        std::str::from_utf8(&bytes).with_context(|| format!("invalid data: {bytes:x?}"))?;
+
+        Ok((Self(bytes), n + len))
+    }
+}
+
 // Array item helpers
 impl<T: WireSize> WireSize for &[T] {
     #[inline]
@@ -572,7 +962,7 @@ impl<T: Serialize> Serialize for Vec<T> {
     }
 }
 
-/// ARRAY | COMPACT_ARRAY
+/// ARRAY
 ///
 /// Represents a sequence of objects of a given type T. Type T can be either a primitive type
 /// (e.g. STRING) or a structure. First, the length N is given as an INT32. Then N instances of
@@ -683,6 +1073,44 @@ impl<T: Deserialize> Deserialize for Array<Option<Vec<T>>> {
         let mut items = Vec::with_capacity(len as usize);
         for i in 0..len {
             let (i, n) = T::read_from(buf, version).with_context(|| format!("array item {i}"))?;
+            items.push(i);
+            size += n;
+        }
+
+        Ok((Self(Some(items)), size))
+    }
+}
+
+impl<T: AsyncDeserialize> AsyncDeserialize for Array<Vec<T>> {
+    async fn read<R>(reader: &mut R, version: i16) -> Result<(Self, usize)>
+    where
+        R: AsyncReadExt + Send + Unpin,
+    {
+        let (Array(Some(items)), size) = <Array<Option<Vec<T>>>>::read(reader, version).await?
+        else {
+            bail!("invalid array length");
+        };
+        Ok((Array(items), size))
+    }
+}
+
+impl<T: AsyncDeserialize> AsyncDeserialize for Array<Option<Vec<T>>> {
+    async fn read<R>(reader: &mut R, version: i16) -> Result<(Self, usize)>
+    where
+        R: AsyncReadExt + Send + Unpin,
+    {
+        let (len, mut size) = i32::read(reader, version).await.context("array length")?;
+        ensure!(len >= -1, "invalid array length");
+
+        if len == -1 {
+            return Ok((Self(None), size));
+        }
+
+        let mut items = Vec::with_capacity(len as usize);
+        for i in 0..len {
+            let (i, n) = T::read(reader, version)
+                .await
+                .with_context(|| format!("array item {i}"))?;
             items.push(i);
             size += n;
         }
@@ -813,6 +1241,46 @@ impl<T: Deserialize> Deserialize for CompactArray<Option<Vec<T>>> {
     }
 }
 
+impl<T: AsyncDeserialize> AsyncDeserialize for CompactArray<Vec<T>> {
+    async fn read<R>(reader: &mut R, version: i16) -> Result<(Self, usize)>
+    where
+        R: AsyncReadExt + Send + Unpin,
+    {
+        let (CompactArray(Some(items)), size) =
+            <CompactArray<Option<Vec<T>>>>::read(reader, version).await?
+        else {
+            bail!("invalid compact array length");
+        };
+        Ok((Self(items), size))
+    }
+}
+
+impl<T: AsyncDeserialize> AsyncDeserialize for CompactArray<Option<Vec<T>>> {
+    async fn read<R>(reader: &mut R, version: i16) -> Result<(Self, usize)>
+    where
+        R: AsyncReadExt + Send + Unpin,
+    {
+        let (UnsignedVarInt(len), mut size) = UnsignedVarInt::read(reader, version)
+            .await
+            .context("compact array length")?;
+
+        if len == 0 {
+            return Ok((Self(None), size));
+        }
+
+        let mut items = Vec::with_capacity((len - 1) as usize);
+        for i in 0..(len - 1) {
+            let (i, n) = T::read(reader, version)
+                .await
+                .with_context(|| format!("compact array item {i}"))?;
+            items.push(i);
+            size += n;
+        }
+
+        Ok((Self(Some(items)), size))
+    }
+}
+
 /// TAG_BUFFER [KIP-482][KIP]
 ///
 /// [KIP]: https://cwiki.apache.org/confluence/display/KAFKA/KIP-482%3A+The+Kafka+Protocol+should+Support+Optional+Tagged+Fields
@@ -887,6 +1355,35 @@ impl Deserialize for TagBuffer {
             ensure!(buf.remaining() > val_len as usize, "not enough bytes left");
 
             let val = buf.copy_to_bytes(val_len as usize);
+            tag_buf.insert(tag as i32, val);
+        }
+
+        Ok((Self(tag_buf), bytes))
+    }
+}
+
+impl AsyncDeserialize for TagBuffer {
+    async fn read<R>(reader: &mut R, version: i16) -> Result<(Self, usize)>
+    where
+        R: AsyncReadExt + Send + Unpin,
+    {
+        let (UnsignedVarInt(count), mut bytes) = UnsignedVarInt::read(reader, version).await?;
+
+        let mut tag_buf = BTreeMap::new();
+
+        for _ in 0..count {
+            let (UnsignedVarInt(tag), n) = UnsignedVarInt::read(reader, version).await?;
+            bytes += n;
+
+            let (UnsignedVarInt(val_len), n) = UnsignedVarInt::read(reader, version).await?;
+            bytes += n;
+
+            let mut buf = BytesMut::with_capacity(val_len as usize);
+            buf.resize(val_len as usize, 0);
+
+            reader.read_exact(&mut buf).await?;
+
+            let val = buf.freeze();
             tag_buf.insert(tag as i32, val);
         }
 

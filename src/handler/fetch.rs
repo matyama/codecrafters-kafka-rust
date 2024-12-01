@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use anyhow::Result;
 
 use crate::kafka::error::{ErrorCode, KafkaError};
@@ -5,40 +7,34 @@ use crate::kafka::request::{self, fetch::*, RequestHeader};
 use crate::kafka::response::{self, fetch::*, ResponseBody};
 use crate::kafka::types::Uuid;
 use crate::kafka::{ApiKey, WireSize as _};
+use crate::storage::{self, Storage};
 
 use super::Handler;
 
-pub struct FetchHandler;
+pub struct FetchHandler {
+    storage: Arc<Storage>,
+}
 
 impl FetchHandler {
-    // TODO: test "known topic" based on current state / stored partition metadata
-    // NOTE: known topic is currently 00000000-0000-4000-0000-000000000000 and above
-    const KNOWN_TOPIC: Uuid = Uuid::from_static(&[0, 0, 0, 0, 0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 0]);
-
-    fn is_known_topic(&self, version: i16, topic: &FetchTopic) -> bool {
-        match version {
-            0..=12 => Uuid::try_from(topic.topic.clone()).map_or(false, |t| t >= Self::KNOWN_TOPIC),
-            _ => topic.topic_id >= Self::KNOWN_TOPIC,
-        }
+    #[inline]
+    pub fn new(storage: Arc<Storage>) -> Self {
+        Self { storage }
     }
 
-    fn fetch_topic(&self, version: i16, ft: FetchTopic) -> FetchableTopicResponse {
-        // TODO: handle old API versions (i.e., `ft.topic -> Uuid`)
-        let topic = ft.topic_id.clone();
-
-        let partitions = if self.is_known_topic(version, &ft) {
-            // TODO: fetch partitions concurrently
-            // XXX: should this be grouped by partition first for better storage access?
-            ft.partitions
-                .into_iter()
-                .map(|fp| self.fetch_partition(version, topic.clone(), fp))
-                .collect()
-        } else {
-            ft.partitions
-                .into_iter()
-                .map(|fp| PartitionData::new(fp.partition, ErrorCode::UNKNOWN_TOPIC_ID, 0))
-                .collect()
+    async fn fetch_topic(&self, version: i16, ft: FetchTopic) -> FetchableTopicResponse {
+        let Some(topic) = ft.topic_id(version) else {
+            return unknonw_topic_response(ft);
         };
+
+        // TODO: fetch partitions concurrently (tokio::spawn)
+        // XXX: should this be grouped by partition first for better storage access?
+        //  - but also return (in response) with partitions in the original order
+        let mut partitions = Vec::with_capacity(ft.partitions.len());
+
+        for fp in ft.partitions {
+            let partition = self.fetch_partition(version, topic.clone(), fp).await;
+            partitions.push(partition);
+        }
 
         FetchableTopicResponse {
             topic: ft.topic,
@@ -48,22 +44,36 @@ impl FetchHandler {
         }
     }
 
-    fn fetch_partition(&self, _version: i16, topic: Uuid, fp: FetchPartition) -> PartitionData {
+    async fn fetch_partition(
+        &self,
+        _version: i16,
+        topic: Uuid,
+        fp: FetchPartition,
+    ) -> PartitionData {
         println!(
             "Fetching ({topic}, {}): {:?}",
             fp.partition, fp.fetch_offset
         );
 
-        // TODO: fill in actual partition data
-        //let mut data = PartitionData::new(fp.partition, ErrorCode::NONE, 0);
-        //data.last_start_offset = fp.fetch_offset;
-        //data.last_stable_offset = fp.fetch_offset;
+        // FIXME: concurrently this fetches the whole segment, given the fetch offset as the base
+        let records = self
+            .storage
+            .fetch_records(topic, fp.partition, fp.fetch_offset)
+            .await;
 
-        // TODO: properly serialized records (seek and memcpy from fs)
-        // https://kafka.apache.org/documentation/#recordbatch
-        //data.records.replace(bytes::Bytes::new());
+        use storage::FetchResult::*;
 
-        PartitionData::new(fp.partition, ErrorCode::NONE, 0)
+        match records {
+            Ok(Records(records)) => {
+                // TODO: fill in actual partition data
+                PartitionData::new(fp.partition, ErrorCode::NONE, 0).with_records(records)
+            }
+            Ok(UnknownTopic) => PartitionData::new(fp.partition, ErrorCode::UNKNOWN_TOPIC_ID, 0),
+            Ok(OffsetOutOfRange) => {
+                PartitionData::new(fp.partition, ErrorCode::OFFSET_OUT_OF_RANGE, 0)
+            }
+            Err(_) => PartitionData::new(fp.partition, ErrorCode::KAFKA_STORAGE_ERROR, 0),
+        }
     }
 }
 
@@ -79,12 +89,13 @@ impl Handler for FetchHandler {
     ) -> Result<(usize, ResponseBody)> {
         let version = header.request_api_version.into_inner();
 
-        // TODO: actual impl
-        let responses = body
-            .topics
-            .into_iter()
-            .map(|topic| self.fetch_topic(version, topic))
-            .collect();
+        let mut responses = Vec::with_capacity(body.topics.len());
+
+        for topic in body.topics {
+            // TODO: tokio::spawn / JoinSet => Arc<Storage>
+            let response = self.fetch_topic(version, topic).await;
+            responses.push(response);
+        }
 
         let body = response::Fetch {
             throttle_time_ms: 0,
@@ -101,5 +112,20 @@ impl Handler for FetchHandler {
         // TODO: throttle_time_ms, session_id for Fetch errors
         let body = response::Fetch::error(0, err.error_code, 0);
         Ok((body.size(err.api_version), ResponseBody::Fetch(body)))
+    }
+}
+
+fn unknonw_topic_response(ft: FetchTopic) -> FetchableTopicResponse {
+    let partitions = ft
+        .partitions
+        .into_iter()
+        .map(|fp| PartitionData::new(fp.partition, ErrorCode::UNKNOWN_TOPIC_ID, 0))
+        .collect();
+
+    FetchableTopicResponse {
+        topic: ft.topic,
+        topic_id: ft.topic_id,
+        partitions,
+        tagged_fields: Default::default(),
     }
 }

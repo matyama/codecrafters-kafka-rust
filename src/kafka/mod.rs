@@ -12,6 +12,7 @@ use error::{ErrorCode, KafkaError};
 
 pub(crate) mod api;
 pub(crate) mod error;
+pub(crate) mod record;
 pub(crate) mod request;
 pub(crate) mod response;
 pub(crate) mod types;
@@ -142,5 +143,32 @@ pub trait Serialize: Sized {
 }
 
 pub trait Deserialize: Sized {
+    const DEFAULT_VERSION: i16 = 0;
+
+    // TODO: rename to `decode`
     fn read_from<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)>;
+
+    #[inline]
+    fn deserialize<B: Buf>(buf: &mut B) -> Result<(Self, usize)> {
+        Self::read_from(buf, Self::DEFAULT_VERSION)
+    }
+}
+
+pub trait AsyncDeserialize: Sized {
+    const DEFAULT_VERSION: i16 = 0;
+
+    #[allow(async_fn_in_trait)]
+    async fn read<R>(reader: &mut R, version: i16) -> Result<(Self, usize)>
+    where
+        // XXX: AsyncBufRead
+        R: AsyncReadExt + Send + Unpin;
+
+    // TODO: rename to `read_from`
+    #[allow(async_fn_in_trait)]
+    async fn read_default<R>(reader: &mut R) -> Result<(Self, usize)>
+    where
+        R: AsyncReadExt + Send + Unpin,
+    {
+        Self::read(reader, Self::DEFAULT_VERSION).await
+    }
 }
