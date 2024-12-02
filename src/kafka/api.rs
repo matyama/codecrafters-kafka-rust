@@ -1,7 +1,7 @@
 use std::ops::RangeInclusive;
 
 use crate::kafka::error::ErrorCode;
-use crate::kafka::{HeaderVersion, WireSize};
+use crate::kafka::{HeaderVersion, Serialize};
 
 macro_rules! repr_enum {
     (
@@ -142,12 +142,12 @@ impl HeaderVersion for ApiKey {
     }
 }
 
-impl WireSize for ApiKey {
+impl Serialize for ApiKey {
     // INT16 repr
     const SIZE: usize = 2;
 
     #[inline]
-    fn size(&self, _version: i16) -> usize {
+    fn encode_size(&self, _version: i16) -> usize {
         Self::SIZE
     }
 }

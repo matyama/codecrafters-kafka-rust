@@ -4,7 +4,7 @@ use tokio::io::AsyncWriteExt;
 use crate::kafka::api::ApiKey;
 use crate::kafka::error::ErrorCode;
 use crate::kafka::types::{Array, CompactArray, TagBuffer};
-use crate::kafka::{Serialize, WireSize};
+use crate::kafka::{AsyncSerialize, Serialize};
 
 /// # ApiVersions Response
 ///
@@ -76,17 +76,20 @@ impl Default for ApiVersions {
     }
 }
 
-impl WireSize for ApiVersions {
+impl Serialize for ApiVersions {
     const SIZE: usize = ErrorCode::SIZE;
 
     #[inline]
-    fn size(&self, version: i16) -> usize {
+    fn encode_size(&self, version: i16) -> usize {
         match version {
-            0 => Self::SIZE + Array(self.api_keys.as_slice()).size(version),
-            1 | 2 => Self::SIZE + Array(self.api_keys.as_slice()).size(version) + 4,
+            0 => Self::SIZE + Array(self.api_keys.as_slice()).encode_size(version),
+            1 | 2 => Self::SIZE + Array(self.api_keys.as_slice()).encode_size(version) + 4,
             _ => {
                 let api_keys = CompactArray(self.api_keys.as_slice());
-                Self::SIZE + api_keys.size(version) + 4 + self.tagged_fields.size(version)
+                Self::SIZE
+                    + api_keys.encode_size(version)
+                    + 4
+                    + self.tagged_fields.encode_size(version)
             }
         }
     }
@@ -119,7 +122,7 @@ impl WireSize for ApiVersions {
 //    }
 //}
 
-impl Serialize for ApiVersions {
+impl AsyncSerialize for ApiVersions {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
         W: AsyncWriteExt + Send + Unpin,
@@ -187,16 +190,16 @@ impl ApiVersion {
     }
 }
 
-impl WireSize for ApiVersion {
+impl Serialize for ApiVersion {
     const SIZE: usize = ApiKey::SIZE + 2 + 2;
 
     #[inline]
-    fn size(&self, version: i16) -> usize {
-        Self::SIZE + self.tagged_fields.size(version)
+    fn encode_size(&self, version: i16) -> usize {
+        Self::SIZE + self.tagged_fields.encode_size(version)
     }
 }
 
-impl Serialize for ApiVersion {
+impl AsyncSerialize for ApiVersion {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
         W: AsyncWriteExt + Send + Unpin,

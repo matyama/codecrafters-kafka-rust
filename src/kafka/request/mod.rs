@@ -71,7 +71,7 @@ impl RequestHeader {
             0 => None,
 
             v if v >= 1 && buf.has_remaining() => {
-                let (client_id, n) = Deserialize::read_from(buf, v)
+                let (client_id, n) = Deserialize::decode(buf, v)
                     .map_err(|_| kafka_err(ErrorCode::INVALID_REQUEST))?;
 
                 header_bytes += n;
@@ -85,7 +85,7 @@ impl RequestHeader {
         let mut tagged_fields = TagBuffer::default();
 
         if header_version >= 2 {
-            let (fields, n) = Deserialize::read_from(buf, header_version)
+            let (fields, n) = Deserialize::decode(buf, header_version)
                 .map_err(|_| kafka_err(ErrorCode::INVALID_REQUEST))?;
 
             tagged_fields = fields;

@@ -23,20 +23,20 @@ pub struct DescribeTopicPartitions {
 }
 
 impl Deserialize for DescribeTopicPartitions {
-    fn read_from<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
+    fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
         let mut body_bytes = 0;
 
-        let (CompactArray(topics), n) = CompactArray::read_from(buf, version).context("topics")?;
+        let (CompactArray(topics), n) = CompactArray::decode(buf, version).context("topics")?;
         body_bytes += n;
 
         let (response_partition_limit, n) =
-            i32::read_from(buf, version).context("response_partition_limit")?;
+            i32::decode(buf, version).context("response_partition_limit")?;
         body_bytes += n;
 
-        let (cursor, n) = Deserialize::read_from(buf, version).context("cursor")?;
+        let (cursor, n) = Deserialize::decode(buf, version).context("cursor")?;
         body_bytes += n;
 
-        let (tagged_fields, n) = TagBuffer::read_from(buf, version).context("tagged_fields")?;
+        let (tagged_fields, n) = TagBuffer::decode(buf, version).context("tagged_fields")?;
         body_bytes += n;
 
         ensure!(
@@ -64,10 +64,10 @@ pub struct TopicRequest {
 }
 
 impl Deserialize for TopicRequest {
-    fn read_from<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
-        let (name, mut size) = CompactStr::read_from(buf, version).context("name")?;
+    fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
+        let (name, mut size) = CompactStr::decode(buf, version).context("name")?;
 
-        let (tagged_fields, n) = TagBuffer::read_from(buf, version).context("tagged_fields")?;
+        let (tagged_fields, n) = TagBuffer::decode(buf, version).context("tagged_fields")?;
         size += n;
 
         let req = Self {

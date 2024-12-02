@@ -6,7 +6,7 @@ use crate::kafka::error::{ErrorCode, KafkaError};
 use crate::kafka::request::{self, fetch::*, RequestHeader};
 use crate::kafka::response::{self, fetch::*, ResponseBody};
 use crate::kafka::types::Uuid;
-use crate::kafka::{ApiKey, WireSize as _};
+use crate::kafka::{ApiKey, Serialize as _};
 use crate::storage::{self, Storage};
 
 use super::Handler;
@@ -105,13 +105,13 @@ impl Handler for FetchHandler {
             ..Default::default()
         };
 
-        Ok((body.size(version), ResponseBody::Fetch(body)))
+        Ok((body.encode_size(version), ResponseBody::Fetch(body)))
     }
 
     async fn handle_error(&self, err: KafkaError) -> Result<(usize, ResponseBody)> {
         // TODO: throttle_time_ms, session_id for Fetch errors
         let body = response::Fetch::error(0, err.error_code, 0);
-        Ok((body.size(err.api_version), ResponseBody::Fetch(body)))
+        Ok((body.encode_size(err.api_version), ResponseBody::Fetch(body)))
     }
 }
 

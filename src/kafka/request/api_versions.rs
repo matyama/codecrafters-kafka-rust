@@ -29,11 +29,11 @@ pub struct ApiVersions {
 }
 
 impl Deserialize for ApiVersions {
-    fn read_from<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
+    fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
         let mut body_bytes = 0;
 
         let client_software_name = if version >= 3 {
-            let (name, n) = CompactStr::read_from(buf, version)?;
+            let (name, n) = CompactStr::decode(buf, version)?;
             body_bytes += n;
             name
         } else {
@@ -41,7 +41,7 @@ impl Deserialize for ApiVersions {
         };
 
         let client_software_version = if version >= 3 {
-            let (ver, n) = CompactStr::read_from(buf, version)?;
+            let (ver, n) = CompactStr::decode(buf, version)?;
             body_bytes += n;
             ver
         } else {
@@ -49,7 +49,7 @@ impl Deserialize for ApiVersions {
         };
 
         let tagged_fields = if version >= 3 {
-            let (tag_buf, n) = TagBuffer::read_from(buf, version)?;
+            let (tag_buf, n) = TagBuffer::decode(buf, version)?;
             body_bytes += n;
             tag_buf
         } else {

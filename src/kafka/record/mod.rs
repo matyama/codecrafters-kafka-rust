@@ -1,47 +1,14 @@
 use anyhow::{bail, ensure, Context as _, Result};
 use bytes::{Buf, Bytes};
 
-use crate::kafka::types::{Array, CompactStr, StrBytes, TagBuffer, Uuid, VarInt, VarLong};
+use crate::kafka::types::{Array, StrBytes, VarInt, VarLong};
 use crate::kafka::Deserialize;
 
-//#[derive(Debug)]
-//pub struct EncodeOptions {
-//    pub version: i8,
-//    pub compression: Compression,
-//}
-//
-//impl Default for EncodeOptions {
-//    #[inline]
-//    fn default() -> Self {
-//        Self {
-//            version: 2,
-//            compression: Compression::default(),
-//        }
-//    }
-//}
-//
-//pub fn encode<'a, B, R>(buf: &mut B, records: R, ops: EncodeOptions) -> Result<usize>
-//where
-//    B: BufMut,
-//    R: IntoIterator<Item = &'a Record>,
-//{
-//    match ops.version {
-//        0..=1 => unimplemented!("legacy message set format is not supported"),
-//        2 => {}
-//        v => bail!("unsupported record batch format v{v}"),
-//    }
-//
-//    let mut records = records.into_iter().peekable();
-//
-//    ensure!(
-//        records.peek().is_some(),
-//        "record batch must contain at lease one record"
-//    );
-//
-//    let batch_lenght = 0;
-//
-//    Ok(batch_lenght)
-//}
+pub(crate) use self::topic::{Topic, TopicRecord};
+
+pub(crate) mod feature_level;
+pub(crate) mod partition;
+pub(crate) mod topic;
 
 pub fn decode<B: Buf + std::fmt::Debug>(buf: &mut B) -> Result<Vec<RecordBatch>> {
     let mut batches = Vec::new();
@@ -192,7 +159,7 @@ pub struct Record {
 }
 
 impl Deserialize for Record {
-    fn read_from<B: Buf>(buf: &mut B, _version: i16) -> Result<(Self, usize)> {
+    fn decode<B: Buf>(buf: &mut B, _version: i16) -> Result<(Self, usize)> {
         let mut byte_size = 0;
 
         let (length, n) = VarInt::deserialize(buf).context("record length")?;
@@ -241,7 +208,7 @@ impl Deserialize for Record {
 pub struct RecordAttrs(pub i8);
 
 impl Deserialize for RecordAttrs {
-    fn read_from<B: Buf>(buf: &mut B, _version: i16) -> Result<(Self, usize)> {
+    fn decode<B: Buf>(buf: &mut B, _version: i16) -> Result<(Self, usize)> {
         ensure!(buf.has_remaining(), "not enough bytes left");
         Ok((Self(buf.get_i8()), 1))
     }
@@ -252,7 +219,7 @@ impl Deserialize for RecordAttrs {
 pub struct RecordBytes(Option<Bytes>);
 
 impl Deserialize for RecordBytes {
-    fn read_from<B: Buf>(buf: &mut B, _version: i16) -> Result<(Self, usize)> {
+    fn decode<B: Buf>(buf: &mut B, _version: i16) -> Result<(Self, usize)> {
         let (VarInt(length), size) = VarInt::deserialize(buf).context("length")?;
 
         let (bytes, size) = match length {
@@ -280,7 +247,7 @@ struct Headers(Vec<Header>);
 
 // NOTE: headers have VarInt array length, so cannot use `Array<Vec<Header>>` instance
 impl Deserialize for Headers {
-    fn read_from<B: Buf>(buf: &mut B, _version: i16) -> Result<(Self, usize)> {
+    fn decode<B: Buf>(buf: &mut B, _version: i16) -> Result<(Self, usize)> {
         let (VarInt(n), mut byte_size) = VarInt::deserialize(buf).context("header count")?;
 
         let mut headers = Vec::with_capacity(n as usize);
@@ -303,7 +270,7 @@ pub struct Header {
 }
 
 impl Deserialize for Header {
-    fn read_from<B: Buf>(buf: &mut B, _version: i16) -> Result<(Self, usize)> {
+    fn decode<B: Buf>(buf: &mut B, _version: i16) -> Result<(Self, usize)> {
         let (VarInt(n), mut byte_size) = VarInt::deserialize(buf).context("header key length")?;
 
         ensure!(n >= 0, "invalid header key length: {n}");
@@ -359,123 +326,6 @@ impl From<i16> for TimestampType {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct Topic {
-    pub name: StrBytes,
-    pub topic_id: Uuid,
-}
-
-impl Topic {
-    #[inline]
-    pub(crate) fn topic_id(&self) -> Uuid {
-        self.topic_id.clone()
-    }
-}
-
-impl From<TopicRecord> for Topic {
-    #[inline]
-    fn from(record: TopicRecord) -> Self {
-        Self {
-            name: record.topic_name,
-            topic_id: record.topic_id,
-        }
-    }
-}
-
-impl From<&TopicRecord> for Topic {
-    #[inline]
-    fn from(record: &TopicRecord) -> Self {
-        Self {
-            name: record.topic_name.clone(),
-            topic_id: record.topic_id.clone(),
-        }
-    }
-}
-
-#[derive(Debug, PartialEq)]
-pub struct TopicRecord {
-    pub frame_version: i8,
-    pub type_: i8,
-    pub version: i8,
-    pub topic_name: StrBytes,
-    pub topic_id: Uuid,
-    pub tagged_fields: TagBuffer,
-}
-
-impl Deserialize for TopicRecord {
-    fn read_from<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
-        let (frame_version, mut size) = i8::read_from(buf, version).context("frame_version")?;
-
-        let (type_, n) = i8::read_from(buf, version).context("type")?;
-        size += n;
-
-        let (ver, n) = i8::read_from(buf, version).context("version")?;
-        size += n;
-
-        let (topic_name, n) = CompactStr::read_from(buf, version).context("topic_name")?;
-        size += n;
-
-        let (topic_id, n) = Uuid::read_from(buf, version).context("topic_id")?;
-        size += n;
-
-        let (tagged_fields, n) = TagBuffer::read_from(buf, version).context("tagged_fields")?;
-        size += n;
-
-        let record = Self {
-            frame_version,
-            type_,
-            version: ver,
-            topic_name: topic_name.into(),
-            topic_id,
-            tagged_fields,
-        };
-
-        Ok((record, size))
-    }
-}
-
-#[derive(Default, PartialEq)]
-pub struct FeatureLevelRecord {
-    pub frame_version: i8,
-    pub type_: i8,
-    pub version: i8,
-    // CompactStr
-    pub name: StrBytes,
-    pub feature_level: i16,
-    pub tagged_fields: TagBuffer,
-}
-
-#[derive(Default, PartialEq)]
-pub struct PartitionRecord {
-    pub frame_version: i8,
-    pub type_: i8,
-    pub version: i8,
-    pub partition_id: i32,
-    pub topic_id: Uuid,
-    // CompactArray
-    pub replicas: Vec<i32>,
-    // CompactArray
-    pub isr: Vec<i32>,
-    // CompactArray
-    pub removing_replicas: Vec<i32>,
-    // CompactArray
-    pub adding_replicas: Vec<i32>,
-    pub leader_id: i32,
-    pub leader_epoch: i32,
-    pub partition_epoch: i32,
-    // CompactArray
-    pub directories: Vec<Uuid>,
-    pub tagged_fields: TagBuffer,
-}
-
-//#[derive(Clone, Copy, Debug, PartialEq)]
-//#[repr(i8)]
-//pub enum RecordType {
-//    Topic = 2,
-//    Partition = 3,
-//    FeatureLevel = 12,
-//}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -524,15 +374,6 @@ mod tests {
 
         buf.extend_from_slice(&value1); // value contents
         buf.extend_from_slice(b"\x00"); // headers array count
-
-        //let value1 = FeatureLevelRecord {
-        //    frame_version: 1,
-        //    type_: 12,
-        //    version: 0,
-        //    name: "metadata.version".into(),
-        //    feature_level: 20,
-        //    tagged_fields: TagBuffer::default(),
-        //};
 
         let batch1 = RecordBatch {
             base_offset: 0,

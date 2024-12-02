@@ -18,13 +18,6 @@ pub(crate) mod request;
 pub(crate) mod response;
 pub(crate) mod types;
 
-// XXX: merge with Serialize
-pub trait WireSize {
-    const SIZE: usize = 0;
-
-    fn size(&self, version: i16) -> usize;
-}
-
 pub trait HeaderVersion {
     // NOTE: header version is generally different, but derivable from the API version
     fn header_version(&self, api_version: i16) -> i16;
@@ -82,21 +75,21 @@ where
         // TODO: other requests
         let body = match api_key {
             ApiKey::ApiVersions => {
-                let (body, _) = request::ApiVersions::read_from(&mut buf, api_version)
+                let (body, _) = request::ApiVersions::decode(&mut buf, api_version)
                     .with_context(|| format!("{api_key:?} v{api_version} message body"))?;
 
                 RequestBody::ApiVersions(body)
             }
 
             ApiKey::Fetch => {
-                let (body, _) = request::Fetch::read_from(&mut buf, api_version)
+                let (body, _) = request::Fetch::decode(&mut buf, api_version)
                     .with_context(|| format!("{api_key:?} v{api_version} message body"))?;
 
                 RequestBody::Fetch(body)
             }
 
             ApiKey::DescribeTopicPartitions => {
-                let (body, _) = request::DescribeTopicPartitions::read_from(&mut buf, api_version)
+                let (body, _) = request::DescribeTopicPartitions::decode(&mut buf, api_version)
                     .with_context(|| format!("{api_key:?} v{api_version} message body"))?;
 
                 RequestBody::DescribeTopicPartitions(body)
@@ -141,42 +134,54 @@ where
     }
 }
 
-pub trait Serialize: Sized {
-    // TODO: parametrize by version
+pub trait Serialize {
+    /// Statically known portion of the total size
+    const SIZE: usize = 0;
+
+    /// Compute the total sized when serialized under given API `version`.
+    fn encode_size(&self, version: i16) -> usize;
+
+    // TODO: fn encode<B: BufMut>(self, buf: &mut B, version: i16) -> Result<()>
+}
+
+pub trait Deserialize: Sized {
+    const DEFAULT_VERSION: i16 = 0;
+
+    /// Deserialize data from the given buffer using specific API `version`.
+    fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)>;
+
+    /// Same as [`decode`](Self::decode) but using implicit `version=DEFAULT_VERSION`.
+    #[inline]
+    fn deserialize<B: Buf>(buf: &mut B) -> Result<(Self, usize)> {
+        Self::decode(buf, Self::DEFAULT_VERSION)
+    }
+}
+
+pub trait AsyncSerialize: Sized {
     // TODO: resolve async_fn_in_trait lint and remove the allow
+    /// Serialize `self` into given `writer` using given API `version`.
     #[allow(async_fn_in_trait)]
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
         W: AsyncWriteExt + Send + Unpin;
 }
 
-pub trait Deserialize: Sized {
-    const DEFAULT_VERSION: i16 = 0;
-
-    // TODO: rename to `decode`
-    fn read_from<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)>;
-
-    #[inline]
-    fn deserialize<B: Buf>(buf: &mut B) -> Result<(Self, usize)> {
-        Self::read_from(buf, Self::DEFAULT_VERSION)
-    }
-}
-
 pub trait AsyncDeserialize: Sized {
     const DEFAULT_VERSION: i16 = 0;
 
+    /// Read and parse data from the given `reader` using specific API `version`.
     #[allow(async_fn_in_trait)]
-    async fn read<R>(reader: &mut R, version: i16) -> Result<(Self, usize)>
+    async fn read_from<R>(reader: &mut R, version: i16) -> Result<(Self, usize)>
     where
         // XXX: AsyncBufRead
         R: AsyncReadExt + Send + Unpin;
 
-    // TODO: rename to `read_from`
+    /// Same as [`read_from`](Self::read_from) but using implicit `version=DEFAULT_VERSION`.
     #[allow(async_fn_in_trait)]
-    async fn read_default<R>(reader: &mut R) -> Result<(Self, usize)>
+    async fn read<R>(reader: &mut R) -> Result<(Self, usize)>
     where
         R: AsyncReadExt + Send + Unpin,
     {
-        Self::read(reader, Self::DEFAULT_VERSION).await
+        Self::read_from(reader, Self::DEFAULT_VERSION).await
     }
 }

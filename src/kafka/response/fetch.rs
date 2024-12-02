@@ -6,7 +6,7 @@ use crate::kafka::error::ErrorCode;
 use crate::kafka::types::{
     Array, CompactArray, CompactBytes, CompactStr, Str, StrBytes, TagBuffer, Uuid,
 };
-use crate::kafka::{Serialize, WireSize};
+use crate::kafka::{AsyncSerialize, Serialize};
 
 /// # Fetch Response
 ///
@@ -100,9 +100,9 @@ impl Default for Fetch {
     }
 }
 
-impl WireSize for Fetch {
+impl Serialize for Fetch {
     #[inline]
-    fn size(&self, version: i16) -> usize {
+    fn encode_size(&self, version: i16) -> usize {
         let mut size = 0;
 
         if version >= 1 {
@@ -111,16 +111,16 @@ impl WireSize for Fetch {
         }
 
         if version >= 7 {
-            size += self.error_code.size(version);
+            size += self.error_code.encode_size(version);
             // session_id
             size += 4;
         }
 
         // responses
         size += if version >= 12 {
-            CompactArray(self.responses.as_slice()).size(version)
+            CompactArray(self.responses.as_slice()).encode_size(version)
         } else {
-            Array(self.responses.as_slice()).size(version)
+            Array(self.responses.as_slice()).encode_size(version)
         };
 
         if version >= 12 {
@@ -128,14 +128,14 @@ impl WireSize for Fetch {
                 // TODO: node_endpoints
             }
 
-            size += self.tagged_fields.size(version)
+            size += self.tagged_fields.encode_size(version)
         }
 
         size
     }
 }
 
-impl Serialize for Fetch {
+impl AsyncSerialize for Fetch {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
         W: AsyncWriteExt + Send + Unpin,
@@ -209,32 +209,32 @@ pub struct FetchableTopicResponse {
     pub tagged_fields: TagBuffer,
 }
 
-impl WireSize for FetchableTopicResponse {
-    fn size(&self, version: i16) -> usize {
+impl Serialize for FetchableTopicResponse {
+    fn encode_size(&self, version: i16) -> usize {
         let mut size = 0;
 
         size += match version {
-            0..=11 => Str::from(&self.topic).size(version),
-            12 => CompactStr::from(&self.topic).size(version),
-            13.. => self.topic_id.size(version),
+            0..=11 => Str::from(&self.topic).encode_size(version),
+            12 => CompactStr::from(&self.topic).encode_size(version),
+            13.. => self.topic_id.encode_size(version),
             _ => 0,
         };
 
         size += if version >= 12 {
-            CompactArray(self.partitions.as_slice()).size(version)
+            CompactArray(self.partitions.as_slice()).encode_size(version)
         } else {
-            Array(self.partitions.as_slice()).size(version)
+            Array(self.partitions.as_slice()).encode_size(version)
         };
 
         if version >= 12 {
-            size += self.tagged_fields.size(version);
+            size += self.tagged_fields.encode_size(version);
         }
 
         size
     }
 }
 
-impl Serialize for FetchableTopicResponse {
+impl AsyncSerialize for FetchableTopicResponse {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
         W: AsyncWriteExt + Send + Unpin,
@@ -362,10 +362,10 @@ impl PartitionData {
     }
 }
 
-impl WireSize for PartitionData {
-    fn size(&self, version: i16) -> usize {
+impl Serialize for PartitionData {
+    fn encode_size(&self, version: i16) -> usize {
         // partition_index + error_code + high_watermark
-        let mut size = 4 + self.error_code.size(version) + 8;
+        let mut size = 4 + self.error_code.encode_size(version) + 8;
 
         if version >= 4 {
             // last_stable_offset
@@ -378,8 +378,8 @@ impl WireSize for PartitionData {
         }
 
         size += match version {
-            4..=11 => Array(&self.aborted_transactions).size(version),
-            12.. => CompactArray(&self.aborted_transactions).size(version),
+            4..=11 => Array(&self.aborted_transactions).encode_size(version),
+            12.. => CompactArray(&self.aborted_transactions).encode_size(version),
             _ => 0,
         };
 
@@ -390,21 +390,21 @@ impl WireSize for PartitionData {
 
         size += if version >= 12 {
             // NOTE: does not clone the raw bytes, just increments the ref count
-            self.records.clone().map(CompactBytes).size(version)
+            self.records.clone().map(CompactBytes).encode_size(version)
         } else {
-            self.records.size(version)
+            self.records.encode_size(version)
         };
 
         if version >= 12 {
             // TODO tagged fields specific to this API key (response)
-            size += self.tagged_fields.size(version);
+            size += self.tagged_fields.encode_size(version);
         }
 
         size
     }
 }
 
-impl Serialize for PartitionData {
+impl AsyncSerialize for PartitionData {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
         W: AsyncWriteExt + Send + Unpin,
@@ -501,23 +501,23 @@ impl Default for EpochEndOffset {
     }
 }
 
-impl WireSize for EpochEndOffset {
+impl Serialize for EpochEndOffset {
     /// Static size (note: only valid for v12+)
     ///
     /// `SIZE = size(epoch) + size(end_offset)`
     const SIZE: usize = 4 + 8;
 
     #[inline]
-    fn size(&self, version: i16) -> usize {
+    fn encode_size(&self, version: i16) -> usize {
         if version >= 12 {
-            Self::SIZE + self.tagged_fields.size(version)
+            Self::SIZE + self.tagged_fields.encode_size(version)
         } else {
             0
         }
     }
 }
 
-impl Serialize for EpochEndOffset {
+impl AsyncSerialize for EpochEndOffset {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
         W: AsyncWriteExt + Send + Unpin,
@@ -567,22 +567,22 @@ impl Default for LeaderIdAndEpoch {
     }
 }
 
-impl WireSize for LeaderIdAndEpoch {
+impl Serialize for LeaderIdAndEpoch {
     /// Static size (note: only valid for v12+)
     ///
     /// `SIZE = size(leader_id) + size(leader_epoch)`
     const SIZE: usize = 4 + 4;
 
-    fn size(&self, version: i16) -> usize {
+    fn encode_size(&self, version: i16) -> usize {
         if version >= 12 {
-            Self::SIZE + self.tagged_fields.size(version)
+            Self::SIZE + self.tagged_fields.encode_size(version)
         } else {
             0
         }
     }
 }
 
-impl Serialize for LeaderIdAndEpoch {
+impl AsyncSerialize for LeaderIdAndEpoch {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
         W: AsyncWriteExt + Send + Unpin,
@@ -634,24 +634,24 @@ impl Default for SnapshotId {
     }
 }
 
-impl WireSize for SnapshotId {
+impl Serialize for SnapshotId {
     /// Static size
     ///
     /// `SIZE = size(end_offset) + size(epoch)`
     const SIZE: usize = 8 + 4;
 
-    fn size(&self, version: i16) -> usize {
+    fn encode_size(&self, version: i16) -> usize {
         let mut size = Self::SIZE;
 
         if version >= 12 {
-            size += self.tagged_fields.size(version);
+            size += self.tagged_fields.encode_size(version);
         }
 
         size
     }
 }
 
-impl Serialize for SnapshotId {
+impl AsyncSerialize for SnapshotId {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
         W: AsyncWriteExt + Send + Unpin,
@@ -684,8 +684,8 @@ pub struct AbortedTransaction {
     pub tagged_fields: TagBuffer,
 }
 
-impl WireSize for AbortedTransaction {
-    fn size(&self, version: i16) -> usize {
+impl Serialize for AbortedTransaction {
+    fn encode_size(&self, version: i16) -> usize {
         let mut size = Self::SIZE;
 
         if version >= 4 {
@@ -694,14 +694,14 @@ impl WireSize for AbortedTransaction {
         }
 
         if version >= 12 {
-            size += self.tagged_fields.size(version);
+            size += self.tagged_fields.encode_size(version);
         }
 
         size
     }
 }
 
-impl Serialize for AbortedTransaction {
+impl AsyncSerialize for AbortedTransaction {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
         W: AsyncWriteExt + Send + Unpin,

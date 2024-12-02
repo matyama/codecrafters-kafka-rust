@@ -9,7 +9,7 @@ use handler::Handler;
 use kafka::error::KafkaError;
 use kafka::request::{RequestBody, RequestMessage};
 use kafka::response::{ResponseHeader, ResponseMessage};
-use kafka::{ApiKey, HeaderVersion, MessageReader, MessageWriter, WireSize as _};
+use kafka::{ApiKey, HeaderVersion, MessageReader, MessageWriter, Serialize as _};
 use properties::ServerProperties;
 use storage::Storage;
 
@@ -134,7 +134,7 @@ impl Server {
         };
 
         Ok(ResponseMessage {
-            size: (header.size(header_version) + body_size) as i32,
+            size: (header.encode_size(header_version) + body_size) as i32,
             header,
             body,
         })
@@ -186,7 +186,7 @@ impl Server {
         };
 
         Ok(ResponseMessage {
-            size: (header.size(header_version) + body_size) as i32,
+            size: (header.encode_size(header_version) + body_size) as i32,
             header,
             body,
         })

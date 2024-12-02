@@ -6,7 +6,7 @@ use crate::kafka::error::{ErrorCode, KafkaError};
 use crate::kafka::request::{self, RequestHeader};
 use crate::kafka::response::{self, describe_topic_partitions::*, ResponseBody};
 use crate::kafka::types::Uuid;
-use crate::kafka::{ApiKey, WireSize as _};
+use crate::kafka::{ApiKey, Serialize as _};
 use crate::storage::Storage;
 
 use super::Handler;
@@ -66,14 +66,14 @@ impl Handler for DescribeTopicPartitionsHandler {
             ..Default::default()
         };
 
-        let size = body.size(version);
+        let size = body.encode_size(version);
         Ok((size, ResponseBody::DescribeTopicPartitions(body)))
     }
 
     async fn handle_error(&self, err: KafkaError) -> Result<(usize, ResponseBody)> {
         // TODO: use err.error_code
         let body = response::DescribeTopicPartitions::default();
-        let size = body.size(err.api_version);
+        let size = body.encode_size(err.api_version);
         Ok((size, ResponseBody::DescribeTopicPartitions(body)))
     }
 }

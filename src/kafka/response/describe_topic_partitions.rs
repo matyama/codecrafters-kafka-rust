@@ -4,7 +4,7 @@ use tokio::io::AsyncWriteExt;
 use crate::kafka::common::Cursor;
 use crate::kafka::error::ErrorCode;
 use crate::kafka::types::{CompactArray, CompactStr, StrBytes, TagBuffer, Uuid};
-use crate::kafka::{Serialize, WireSize};
+use crate::kafka::{AsyncSerialize, Serialize};
 
 /// # ApiVersions Request
 ///
@@ -30,19 +30,19 @@ pub struct DescribeTopicPartitions {
     pub tagged_fields: TagBuffer,
 }
 
-impl WireSize for DescribeTopicPartitions {
+impl Serialize for DescribeTopicPartitions {
     const SIZE: usize = 4;
 
-    fn size(&self, version: i16) -> usize {
+    fn encode_size(&self, version: i16) -> usize {
         let mut size = Self::SIZE;
-        size += CompactArray(self.topics.as_slice()).size(version);
-        size += self.cursor.size(version);
-        size += self.tagged_fields.size(version);
+        size += CompactArray(self.topics.as_slice()).encode_size(version);
+        size += self.cursor.encode_size(version);
+        size += self.tagged_fields.encode_size(version);
         size
     }
 }
 
-impl Serialize for DescribeTopicPartitions {
+impl AsyncSerialize for DescribeTopicPartitions {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
         W: AsyncWriteExt + Send + Unpin,
@@ -124,19 +124,19 @@ impl DescribeTopicPartitionsResponseTopic {
     }
 }
 
-impl WireSize for DescribeTopicPartitionsResponseTopic {
+impl Serialize for DescribeTopicPartitionsResponseTopic {
     const SIZE: usize = ErrorCode::SIZE + Uuid::SIZE + 1 + 4;
 
-    fn size(&self, version: i16) -> usize {
+    fn encode_size(&self, version: i16) -> usize {
         let mut size = Self::SIZE;
-        size += self.name.size(version);
-        size += CompactArray(self.partitions.as_slice()).size(version);
-        size += self.tagged_fields.size(version);
+        size += self.name.encode_size(version);
+        size += CompactArray(self.partitions.as_slice()).encode_size(version);
+        size += self.tagged_fields.encode_size(version);
         size
     }
 }
 
-impl Serialize for DescribeTopicPartitionsResponseTopic {
+impl AsyncSerialize for DescribeTopicPartitionsResponseTopic {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
         W: AsyncWriteExt + Send + Unpin,
@@ -219,7 +219,6 @@ impl DescribeTopicPartitionsResponsePartition {
         Self {
             error_code: ErrorCode::NONE,
             partition_index,
-            // TODO: default value
             leader_id: 0,
             leader_epoch: -1,
             replica_nodes: Vec::new(),
@@ -232,22 +231,22 @@ impl DescribeTopicPartitionsResponsePartition {
     }
 }
 
-impl WireSize for DescribeTopicPartitionsResponsePartition {
+impl Serialize for DescribeTopicPartitionsResponsePartition {
     const SIZE: usize = ErrorCode::SIZE + 4 + 4 + 4;
 
-    fn size(&self, version: i16) -> usize {
+    fn encode_size(&self, version: i16) -> usize {
         let mut size = Self::SIZE;
-        size += CompactArray(self.replica_nodes.as_slice()).size(version);
-        size += CompactArray(self.isr_nodes.as_slice()).size(version);
-        size += CompactArray(&self.eligible_leader_replicas).size(version);
-        size += CompactArray(&self.last_known_elr).size(version);
-        size += CompactArray(self.offline_replicas.as_slice()).size(version);
-        size += self.tagged_fields.size(version);
+        size += CompactArray(self.replica_nodes.as_slice()).encode_size(version);
+        size += CompactArray(self.isr_nodes.as_slice()).encode_size(version);
+        size += CompactArray(&self.eligible_leader_replicas).encode_size(version);
+        size += CompactArray(&self.last_known_elr).encode_size(version);
+        size += CompactArray(self.offline_replicas.as_slice()).encode_size(version);
+        size += self.tagged_fields.encode_size(version);
         size
     }
 }
 
-impl Serialize for DescribeTopicPartitionsResponsePartition {
+impl AsyncSerialize for DescribeTopicPartitionsResponsePartition {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
         W: tokio::io::AsyncWriteExt + Send + Unpin,

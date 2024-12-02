@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 #[derive(Debug, thiserror::Error)]
 #[error("KafkaError: {error_code:?}, api key {api_key} correlation id {correlation_id:?}")]
 pub struct KafkaError {
@@ -416,11 +414,11 @@ pub enum ErrorCode {
     TRANSACTION_ABORTABLE = 120,
 }
 
-impl crate::kafka::WireSize for ErrorCode {
+impl crate::kafka::Serialize for ErrorCode {
     const SIZE: usize = 2;
 
     #[inline]
-    fn size(&self, _version: i16) -> usize {
+    fn encode_size(&self, _version: i16) -> usize {
         Self::SIZE
     }
 }

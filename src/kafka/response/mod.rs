@@ -2,7 +2,7 @@ use anyhow::{Context as _, Result};
 use tokio::io::AsyncWriteExt;
 
 use crate::kafka::types::TagBuffer;
-use crate::kafka::{HeaderVersion, Serialize, WireSize};
+use crate::kafka::{AsyncSerialize, HeaderVersion, Serialize};
 
 pub(crate) use api_versions::ApiVersions;
 pub(crate) use describe_topic_partitions::DescribeTopicPartitions;
@@ -20,19 +20,19 @@ pub struct ResponseHeader {
     pub tagged_fields: TagBuffer,
 }
 
-impl WireSize for ResponseHeader {
+impl Serialize for ResponseHeader {
     const SIZE: usize = 4;
 
     #[inline]
-    fn size(&self, version: i16) -> usize {
+    fn encode_size(&self, version: i16) -> usize {
         match version {
             0 => Self::SIZE,
-            _ => Self::SIZE + self.tagged_fields.size(version),
+            _ => Self::SIZE + self.tagged_fields.encode_size(version),
         }
     }
 }
 
-impl Serialize for ResponseHeader {
+impl AsyncSerialize for ResponseHeader {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
         W: AsyncWriteExt + Send + Unpin,
@@ -60,7 +60,7 @@ pub struct ResponseMessage {
     pub body: ResponseBody,
 }
 
-impl Serialize for ResponseMessage {
+impl AsyncSerialize for ResponseMessage {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
         W: AsyncWriteExt + Send + Unpin,
@@ -104,7 +104,7 @@ impl HeaderVersion for ResponseBody {
     }
 }
 
-impl Serialize for ResponseBody {
+impl AsyncSerialize for ResponseBody {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
         W: AsyncWriteExt + Send + Unpin,

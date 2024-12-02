@@ -3,7 +3,7 @@ use bytes::Buf;
 use tokio::io::AsyncWriteExt;
 
 use crate::kafka::types::{CompactStr, TagBuffer};
-use crate::kafka::{Deserialize, Serialize, WireSize};
+use crate::kafka::{AsyncSerialize, Deserialize, Serialize};
 
 #[derive(Debug, PartialEq)]
 pub struct Cursor {
@@ -16,13 +16,13 @@ pub struct Cursor {
 }
 
 impl Deserialize for Cursor {
-    fn read_from<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
-        let (topic_name, mut size) = CompactStr::read_from(buf, version)?;
+    fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
+        let (topic_name, mut size) = CompactStr::decode(buf, version)?;
 
-        let (partition_index, n) = i32::read_from(buf, version)?;
+        let (partition_index, n) = i32::decode(buf, version)?;
         size += n;
 
-        let (tagged_fields, n) = TagBuffer::read_from(buf, version)?;
+        let (tagged_fields, n) = TagBuffer::decode(buf, version)?;
         size += n;
 
         let cursor = Self {
@@ -36,17 +36,17 @@ impl Deserialize for Cursor {
 }
 
 impl Deserialize for Option<Cursor> {
-    fn read_from<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
-        let (present, n) = i8::read_from(buf, version)?;
+    fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
+        let (present, n) = i8::decode(buf, version)?;
         if present == 1 {
-            Cursor::read_from(buf, version).map(|(cursor, size)| (Some(cursor), size + n))
+            Cursor::decode(buf, version).map(|(cursor, size)| (Some(cursor), size + n))
         } else {
             Ok((None, n))
         }
     }
 }
 
-impl Serialize for Cursor {
+impl AsyncSerialize for Cursor {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
         W: AsyncWriteExt + Send + Unpin,
@@ -70,7 +70,7 @@ impl Serialize for Cursor {
     }
 }
 
-impl Serialize for Option<Cursor> {
+impl AsyncSerialize for Option<Cursor> {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
         W: AsyncWriteExt + Send + Unpin,
@@ -85,21 +85,21 @@ impl Serialize for Option<Cursor> {
     }
 }
 
-impl WireSize for Cursor {
+impl Serialize for Cursor {
     const SIZE: usize = 4;
 
-    fn size(&self, version: i16) -> usize {
+    fn encode_size(&self, version: i16) -> usize {
         let mut size = Self::SIZE;
-        size += self.topic_name.size(version);
-        size += self.tagged_fields.size(version);
+        size += self.topic_name.encode_size(version);
+        size += self.tagged_fields.encode_size(version);
         size
     }
 }
 
-impl WireSize for Option<Cursor> {
+impl Serialize for Option<Cursor> {
     #[inline]
-    fn size(&self, version: i16) -> usize {
-        self.as_ref().map_or(1, |c| c.size(version))
+    fn encode_size(&self, version: i16) -> usize {
+        self.as_ref().map_or(1, |c| c.encode_size(version))
     }
 }
 

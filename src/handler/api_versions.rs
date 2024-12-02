@@ -3,7 +3,7 @@ use anyhow::Result;
 use crate::kafka::error::{ErrorCode, KafkaError};
 use crate::kafka::request::{self, RequestHeader};
 use crate::kafka::response::{self, api_versions::*, ResponseBody};
-use crate::kafka::{ApiKey, WireSize as _};
+use crate::kafka::{ApiKey, Serialize as _};
 
 use super::Handler;
 
@@ -26,7 +26,7 @@ impl Handler for ApiVersionsHandler {
             ..Default::default()
         };
 
-        Ok((body.size(version), ResponseBody::ApiVersions(body)))
+        Ok((body.encode_size(version), ResponseBody::ApiVersions(body)))
     }
 
     async fn handle_error(&self, err: KafkaError) -> Result<(usize, ResponseBody)> {
@@ -48,6 +48,9 @@ impl Handler for ApiVersionsHandler {
             },
         };
 
-        Ok((body.size(err.api_version), ResponseBody::ApiVersions(body)))
+        Ok((
+            body.encode_size(err.api_version),
+            ResponseBody::ApiVersions(body),
+        ))
     }
 }

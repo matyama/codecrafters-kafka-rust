@@ -125,7 +125,7 @@ pub struct Fetch {
 }
 
 impl Deserialize for Fetch {
-    fn read_from<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
+    fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
         let mut body_bytes = 0;
 
         let replica_id = match version {
@@ -183,13 +183,13 @@ impl Deserialize for Fetch {
         // TODO: make a macro or a trait for this
         let topics = match version {
             0..=11 => {
-                let (Array(items), n) = Deserialize::read_from(buf, version).context("topics")?;
+                let (Array(items), n) = Deserialize::decode(buf, version).context("topics")?;
                 body_bytes += n;
                 items
             }
             12.. => {
                 let (CompactArray(items), n) =
-                    Deserialize::read_from(buf, version).context("topics")?;
+                    Deserialize::decode(buf, version).context("topics")?;
                 body_bytes += n;
                 items
             }
@@ -199,14 +199,14 @@ impl Deserialize for Fetch {
         let forgotten_topics_data = match version {
             7..=11 => {
                 let (Array(items), n) =
-                    Deserialize::read_from(buf, version).context("forgotten topics data")?;
+                    Deserialize::decode(buf, version).context("forgotten topics data")?;
                 body_bytes += n;
                 items
             }
 
             12.. => {
                 let (CompactArray(items), n) =
-                    Deserialize::read_from(buf, version).context("forgotten topics data")?;
+                    Deserialize::decode(buf, version).context("forgotten topics data")?;
                 body_bytes += n;
                 items
             }
@@ -216,12 +216,12 @@ impl Deserialize for Fetch {
 
         let rack_id = match version {
             11 => {
-                let (id, n) = Option::<Str>::read_from(buf, version).context("rack id")?;
+                let (id, n) = Option::<Str>::decode(buf, version).context("rack id")?;
                 body_bytes += n;
                 id.into()
             }
             12.. => {
-                let (id, n) = CompactStr::read_from(buf, version).context("rack id")?;
+                let (id, n) = CompactStr::decode(buf, version).context("rack id")?;
                 body_bytes += n;
                 id.into()
             }
@@ -238,7 +238,7 @@ impl Deserialize for Fetch {
                 // TODO: overwrite replica_state from tagged fields (tag=1)
             }
 
-            let (tag_buf, n) = TagBuffer::read_from(buf, version)?;
+            let (tag_buf, n) = TagBuffer::decode(buf, version)?;
             body_bytes += n;
 
             tagged_fields = tag_buf;
@@ -290,7 +290,7 @@ impl Default for ReplicaState {
 }
 
 impl Deserialize for ReplicaState {
-    fn read_from<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
+    fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
         if version < 15 {
             return Ok((Self::default(), 0));
         }
@@ -339,17 +339,17 @@ impl FetchTopic {
 }
 
 impl Deserialize for FetchTopic {
-    fn read_from<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
+    fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
         let mut size = 0;
 
         let topic = match version {
             0..=11 => {
-                let (topic, n) = Str::read_from(buf, version).context("partitions")?;
+                let (topic, n) = Str::decode(buf, version).context("partitions")?;
                 size += n;
                 topic.into()
             }
             12 => {
-                let (topic, n) = CompactStr::read_from(buf, version).context("partitions")?;
+                let (topic, n) = CompactStr::decode(buf, version).context("partitions")?;
                 size += n;
                 topic.into()
             }
@@ -357,7 +357,7 @@ impl Deserialize for FetchTopic {
         };
 
         let topic_id = if version >= 13 {
-            let (id, n) = Uuid::read_from(buf, version).context("topic id")?;
+            let (id, n) = Uuid::decode(buf, version).context("topic id")?;
             size += n;
             id
         } else {
@@ -366,14 +366,13 @@ impl Deserialize for FetchTopic {
 
         let partitions = match version {
             0..=11 => {
-                let (Array(items), n) =
-                    Deserialize::read_from(buf, version).context("partitions")?;
+                let (Array(items), n) = Deserialize::decode(buf, version).context("partitions")?;
                 size += n;
                 items
             }
             12.. => {
                 let (CompactArray(items), n) =
-                    Deserialize::read_from(buf, version).context("partitions")?;
+                    Deserialize::decode(buf, version).context("partitions")?;
                 size += n;
                 items
             }
@@ -382,7 +381,7 @@ impl Deserialize for FetchTopic {
         };
 
         let tagged_fields = if version >= 12 {
-            let (tag_buf, n) = TagBuffer::read_from(buf, version)?;
+            let (tag_buf, n) = TagBuffer::decode(buf, version)?;
             size += n;
             tag_buf
         } else {
@@ -430,7 +429,7 @@ pub struct FetchPartition {
 }
 
 impl Deserialize for FetchPartition {
-    fn read_from<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
+    fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
         let mut size = 0;
 
         ensure!(buf.remaining() >= 4, "not enough bytes left");
@@ -470,7 +469,7 @@ impl Deserialize for FetchPartition {
         size += 4;
 
         let tagged_fields = if version >= 12 {
-            let (tag_buf, n) = TagBuffer::read_from(buf, version)?;
+            let (tag_buf, n) = TagBuffer::decode(buf, version)?;
             size += n;
             tag_buf
         } else {
@@ -516,17 +515,17 @@ pub struct ForgottenTopic {
 }
 
 impl Deserialize for ForgottenTopic {
-    fn read_from<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
+    fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
         let mut byte_size = 0;
 
         let topic = match version {
             7..=11 => {
-                let (topic, n) = Option::<Str>::read_from(buf, version).context("topic")?;
+                let (topic, n) = Option::<Str>::decode(buf, version).context("topic")?;
                 byte_size += n;
                 topic.into()
             }
             12.. => {
-                let (topic, n) = CompactStr::read_from(buf, version).context("topic")?;
+                let (topic, n) = CompactStr::decode(buf, version).context("topic")?;
                 byte_size += n;
                 topic.into()
             }
@@ -534,7 +533,7 @@ impl Deserialize for ForgottenTopic {
         };
 
         let topic_id = if version >= 13 {
-            let (id, n) = Uuid::read_from(buf, version).context("topic id")?;
+            let (id, n) = Uuid::decode(buf, version).context("topic id")?;
             byte_size += n;
             id
         } else {
@@ -544,13 +543,13 @@ impl Deserialize for ForgottenTopic {
         let partitions = match version {
             7..=11 => {
                 let (Array(ps), n) =
-                    Array::<Vec<i32>>::read_from(buf, version).context("partitions")?;
+                    Array::<Vec<i32>>::decode(buf, version).context("partitions")?;
                 byte_size += n;
                 ps
             }
             12.. => {
                 let (CompactArray(ps), n) =
-                    CompactArray::<Vec<i32>>::read_from(buf, version).context("partitions")?;
+                    CompactArray::<Vec<i32>>::decode(buf, version).context("partitions")?;
                 byte_size += n;
                 ps
             }
@@ -558,7 +557,7 @@ impl Deserialize for ForgottenTopic {
         };
 
         let tagged_fields = if version >= 12 {
-            let (tag_buf, n) = TagBuffer::read_from(buf, version)?;
+            let (tag_buf, n) = TagBuffer::decode(buf, version)?;
             byte_size += n;
 
             tag_buf

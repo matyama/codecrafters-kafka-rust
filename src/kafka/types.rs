@@ -4,20 +4,20 @@ use anyhow::{bail, ensure, Context as _, Result};
 use bytes::{Buf, Bytes, BytesMut};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::kafka::{AsyncDeserialize, Deserialize, Serialize, WireSize};
+use crate::kafka::{AsyncDeserialize, AsyncSerialize, Deserialize, Serialize};
 
 const EMPTY: Bytes = Bytes::from_static(&[]);
 
-impl WireSize for bool {
+impl Serialize for bool {
     const SIZE: usize = 1;
 
     #[inline]
-    fn size(&self, _version: i16) -> usize {
+    fn encode_size(&self, _version: i16) -> usize {
         Self::SIZE
     }
 }
 
-impl Serialize for bool {
+impl AsyncSerialize for bool {
     #[inline]
     async fn write_into<W>(self, writer: &mut W, _version: i16) -> Result<()>
     where
@@ -32,14 +32,14 @@ impl Serialize for bool {
 /// Represents a boolean value in a byte. Values 0 and 1 are used to represent false and true
 /// respectively. When reading a boolean value, any non-zero value is considered true.
 impl Deserialize for bool {
-    fn read_from<B: Buf>(buf: &mut B, _version: i16) -> Result<(Self, usize)> {
+    fn decode<B: Buf>(buf: &mut B, _version: i16) -> Result<(Self, usize)> {
         ensure!(buf.has_remaining(), "not enough bytes left");
         Ok((buf.get_u8() > 0, 1))
     }
 }
 
 impl AsyncDeserialize for bool {
-    async fn read<R>(reader: &mut R, _version: i16) -> Result<(Self, usize)>
+    async fn read_from<R>(reader: &mut R, _version: i16) -> Result<(Self, usize)>
     where
         R: AsyncReadExt + Send + Unpin,
     {
@@ -49,14 +49,14 @@ impl AsyncDeserialize for bool {
 
 // TODO: deduplicate these primitive impls via a macro
 impl Deserialize for i8 {
-    fn read_from<B: Buf>(buf: &mut B, _version: i16) -> Result<(Self, usize)> {
+    fn decode<B: Buf>(buf: &mut B, _version: i16) -> Result<(Self, usize)> {
         ensure!(buf.remaining() >= 1, "not enough bytes left");
         Ok((buf.get_i8(), 1))
     }
 }
 
 impl AsyncDeserialize for i8 {
-    async fn read<R>(reader: &mut R, _version: i16) -> Result<(Self, usize)>
+    async fn read_from<R>(reader: &mut R, _version: i16) -> Result<(Self, usize)>
     where
         R: AsyncReadExt + Send + Unpin,
     {
@@ -65,14 +65,14 @@ impl AsyncDeserialize for i8 {
 }
 
 impl Deserialize for i16 {
-    fn read_from<B: Buf>(buf: &mut B, _version: i16) -> Result<(Self, usize)> {
+    fn decode<B: Buf>(buf: &mut B, _version: i16) -> Result<(Self, usize)> {
         ensure!(buf.remaining() >= 2, "not enough bytes left");
         Ok((buf.get_i16(), 2))
     }
 }
 
 impl AsyncDeserialize for i16 {
-    async fn read<R>(reader: &mut R, _version: i16) -> Result<(Self, usize)>
+    async fn read_from<R>(reader: &mut R, _version: i16) -> Result<(Self, usize)>
     where
         R: AsyncReadExt + Send + Unpin,
     {
@@ -81,14 +81,14 @@ impl AsyncDeserialize for i16 {
 }
 
 impl Deserialize for u32 {
-    fn read_from<B: Buf>(buf: &mut B, _version: i16) -> Result<(Self, usize)> {
+    fn decode<B: Buf>(buf: &mut B, _version: i16) -> Result<(Self, usize)> {
         ensure!(buf.remaining() >= 4, "not enough bytes left");
         Ok((buf.get_u32(), 4))
     }
 }
 
 impl AsyncDeserialize for u32 {
-    async fn read<R>(reader: &mut R, _version: i16) -> Result<(Self, usize)>
+    async fn read_from<R>(reader: &mut R, _version: i16) -> Result<(Self, usize)>
     where
         R: AsyncReadExt + Send + Unpin,
     {
@@ -97,14 +97,14 @@ impl AsyncDeserialize for u32 {
 }
 
 impl Deserialize for i32 {
-    fn read_from<B: Buf>(buf: &mut B, _version: i16) -> Result<(Self, usize)> {
+    fn decode<B: Buf>(buf: &mut B, _version: i16) -> Result<(Self, usize)> {
         ensure!(buf.remaining() >= 4, "not enough bytes left");
         Ok((buf.get_i32(), 4))
     }
 }
 
 impl AsyncDeserialize for i32 {
-    async fn read<R>(reader: &mut R, _version: i16) -> Result<(Self, usize)>
+    async fn read_from<R>(reader: &mut R, _version: i16) -> Result<(Self, usize)>
     where
         R: AsyncReadExt + Send + Unpin,
     {
@@ -112,7 +112,7 @@ impl AsyncDeserialize for i32 {
     }
 }
 
-impl Serialize for i32 {
+impl AsyncSerialize for i32 {
     #[inline]
     async fn write_into<W>(self, writer: &mut W, _version: i16) -> Result<()>
     where
@@ -122,24 +122,24 @@ impl Serialize for i32 {
     }
 }
 
-impl WireSize for i32 {
+impl Serialize for i32 {
     const SIZE: usize = 4;
 
     #[inline]
-    fn size(&self, _version: i16) -> usize {
+    fn encode_size(&self, _version: i16) -> usize {
         Self::SIZE
     }
 }
 
 impl Deserialize for i64 {
-    fn read_from<B: Buf>(buf: &mut B, _version: i16) -> Result<(Self, usize)> {
+    fn decode<B: Buf>(buf: &mut B, _version: i16) -> Result<(Self, usize)> {
         ensure!(buf.remaining() >= 8, "not enough bytes left");
         Ok((buf.get_i64(), 8))
     }
 }
 
 impl AsyncDeserialize for i64 {
-    async fn read<R>(reader: &mut R, _version: i16) -> Result<(Self, usize)>
+    async fn read_from<R>(reader: &mut R, _version: i16) -> Result<(Self, usize)>
     where
         R: AsyncReadExt + Send + Unpin,
     {
@@ -155,14 +155,14 @@ impl AsyncDeserialize for i64 {
 #[repr(transparent)]
 pub struct VarInt(pub(crate) i32);
 
-impl WireSize for VarInt {
+impl Serialize for VarInt {
     #[inline]
-    fn size(&self, version: i16) -> usize {
-        UnsignedVarInt::from(*self).size(version)
+    fn encode_size(&self, version: i16) -> usize {
+        UnsignedVarInt::from(*self).encode_size(version)
     }
 }
 
-impl Serialize for VarInt {
+impl AsyncSerialize for VarInt {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
         W: AsyncWriteExt + Send + Unpin,
@@ -172,17 +172,17 @@ impl Serialize for VarInt {
 }
 
 impl Deserialize for VarInt {
-    fn read_from<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
-        UnsignedVarInt::read_from(buf, version).map(|(zigzag, bytes)| (Self::from(zigzag), bytes))
+    fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
+        UnsignedVarInt::decode(buf, version).map(|(zigzag, bytes)| (Self::from(zigzag), bytes))
     }
 }
 
 impl AsyncDeserialize for VarInt {
-    async fn read<R>(reader: &mut R, version: i16) -> Result<(Self, usize)>
+    async fn read_from<R>(reader: &mut R, version: i16) -> Result<(Self, usize)>
     where
         R: AsyncReadExt + Send + Unpin,
     {
-        let (zigzag, bytes) = UnsignedVarInt::read(reader, version).await?;
+        let (zigzag, bytes) = UnsignedVarInt::read_from(reader, version).await?;
         Ok((Self::from(zigzag), bytes))
     }
 }
@@ -218,8 +218,8 @@ impl TryFrom<VarInt> for usize {
 #[repr(transparent)]
 pub struct UnsignedVarInt(u32);
 
-impl WireSize for UnsignedVarInt {
-    fn size(&self, _version: i16) -> usize {
+impl Serialize for UnsignedVarInt {
+    fn encode_size(&self, _version: i16) -> usize {
         match self.0 {
             0x0..=0x7f => 1,
             0x80..=0x3fff => 2,
@@ -230,7 +230,7 @@ impl WireSize for UnsignedVarInt {
     }
 }
 
-impl Serialize for UnsignedVarInt {
+impl AsyncSerialize for UnsignedVarInt {
     async fn write_into<W>(self, writer: &mut W, _version: i16) -> Result<()>
     where
         W: AsyncWriteExt + Send + Unpin,
@@ -253,7 +253,7 @@ impl Serialize for UnsignedVarInt {
 }
 
 impl Deserialize for UnsignedVarInt {
-    fn read_from<B: Buf>(buf: &mut B, _version: i16) -> Result<(Self, usize)> {
+    fn decode<B: Buf>(buf: &mut B, _version: i16) -> Result<(Self, usize)> {
         let mut value = 0;
         let mut bytes = 0;
         for i in 0..5 {
@@ -270,7 +270,7 @@ impl Deserialize for UnsignedVarInt {
 }
 
 impl AsyncDeserialize for UnsignedVarInt {
-    async fn read<R>(reader: &mut R, _version: i16) -> Result<(Self, usize)>
+    async fn read_from<R>(reader: &mut R, _version: i16) -> Result<(Self, usize)>
     where
         R: AsyncReadExt + Send + Unpin,
     {
@@ -296,14 +296,14 @@ impl AsyncDeserialize for UnsignedVarInt {
 #[repr(transparent)]
 pub struct VarLong(pub(crate) i64);
 
-impl WireSize for VarLong {
+impl Serialize for VarLong {
     #[inline]
-    fn size(&self, version: i16) -> usize {
-        UnsignedVarLong::from(*self).size(version)
+    fn encode_size(&self, version: i16) -> usize {
+        UnsignedVarLong::from(*self).encode_size(version)
     }
 }
 
-impl Serialize for VarLong {
+impl AsyncSerialize for VarLong {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
         W: AsyncWriteExt + Send + Unpin,
@@ -315,17 +315,17 @@ impl Serialize for VarLong {
 }
 
 impl Deserialize for VarLong {
-    fn read_from<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
-        UnsignedVarLong::read_from(buf, version).map(|(zigzag, bytes)| (Self::from(zigzag), bytes))
+    fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
+        UnsignedVarLong::decode(buf, version).map(|(zigzag, bytes)| (Self::from(zigzag), bytes))
     }
 }
 
 impl AsyncDeserialize for VarLong {
-    async fn read<R>(reader: &mut R, version: i16) -> Result<(Self, usize)>
+    async fn read_from<R>(reader: &mut R, version: i16) -> Result<(Self, usize)>
     where
         R: AsyncReadExt + Send + Unpin,
     {
-        let (zigzag, bytes) = UnsignedVarLong::read(reader, version).await?;
+        let (zigzag, bytes) = UnsignedVarLong::read_from(reader, version).await?;
         Ok((Self::from(zigzag), bytes))
     }
 }
@@ -352,8 +352,8 @@ impl From<VarLong> for UnsignedVarLong {
 #[repr(transparent)]
 pub struct UnsignedVarLong(u64);
 
-impl WireSize for UnsignedVarLong {
-    fn size(&self, _version: i16) -> usize {
+impl Serialize for UnsignedVarLong {
+    fn encode_size(&self, _version: i16) -> usize {
         match self.0 {
             0x0..=0x7f => 1,
             0x80..=0x3fff => 2,
@@ -369,7 +369,7 @@ impl WireSize for UnsignedVarLong {
     }
 }
 
-impl Serialize for UnsignedVarLong {
+impl AsyncSerialize for UnsignedVarLong {
     async fn write_into<W>(self, writer: &mut W, _version: i16) -> Result<()>
     where
         W: AsyncWriteExt + Send + Unpin,
@@ -392,7 +392,7 @@ impl Serialize for UnsignedVarLong {
 }
 
 impl Deserialize for UnsignedVarLong {
-    fn read_from<B: Buf>(buf: &mut B, _version: i16) -> Result<(Self, usize)> {
+    fn decode<B: Buf>(buf: &mut B, _version: i16) -> Result<(Self, usize)> {
         let mut value = 0;
         let mut bytes = 0;
         for i in 0..10 {
@@ -409,7 +409,7 @@ impl Deserialize for UnsignedVarLong {
 }
 
 impl AsyncDeserialize for UnsignedVarLong {
-    async fn read<R>(reader: &mut R, _version: i16) -> Result<(Self, usize)>
+    async fn read_from<R>(reader: &mut R, _version: i16) -> Result<(Self, usize)>
     where
         R: AsyncReadExt + Send + Unpin,
     {
@@ -427,25 +427,25 @@ impl AsyncDeserialize for UnsignedVarLong {
     }
 }
 
-impl WireSize for Bytes {
+impl Serialize for Bytes {
     const SIZE: usize = 4;
 
     #[inline]
-    fn size(&self, _version: i16) -> usize {
+    fn encode_size(&self, _version: i16) -> usize {
         Self::SIZE + self.len()
     }
 }
 
-impl WireSize for Option<Bytes> {
+impl Serialize for Option<Bytes> {
     const SIZE: usize = Bytes::SIZE;
 
     #[inline]
-    fn size(&self, version: i16) -> usize {
-        self.as_ref().map_or(Self::SIZE, |b| b.size(version))
+    fn encode_size(&self, version: i16) -> usize {
+        self.as_ref().map_or(Self::SIZE, |b| b.encode_size(version))
     }
 }
 
-impl Serialize for Bytes {
+impl AsyncSerialize for Bytes {
     async fn write_into<W>(self, writer: &mut W, _version: i16) -> Result<()>
     where
         W: AsyncWriteExt + Send + Unpin,
@@ -459,7 +459,7 @@ impl Serialize for Bytes {
     }
 }
 
-impl Serialize for Option<Bytes> {
+impl AsyncSerialize for Option<Bytes> {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
         W: AsyncWriteExt + Send + Unpin,
@@ -482,21 +482,21 @@ impl CompactBytes {
     }
 }
 
-impl WireSize for CompactBytes {
-    #[inline]
-    fn size(&self, version: i16) -> usize {
-        self.enc_len().size(version) + self.0.len()
-    }
-}
-
-impl WireSize for Option<CompactBytes> {
-    #[inline]
-    fn size(&self, version: i16) -> usize {
-        self.as_ref().map_or(1, |b| b.size(version))
-    }
-}
-
 impl Serialize for CompactBytes {
+    #[inline]
+    fn encode_size(&self, version: i16) -> usize {
+        self.enc_len().encode_size(version) + self.0.len()
+    }
+}
+
+impl Serialize for Option<CompactBytes> {
+    #[inline]
+    fn encode_size(&self, version: i16) -> usize {
+        self.as_ref().map_or(1, |b| b.encode_size(version))
+    }
+}
+
+impl AsyncSerialize for CompactBytes {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
         W: AsyncWriteExt + Send + Unpin,
@@ -510,7 +510,7 @@ impl Serialize for CompactBytes {
     }
 }
 
-impl Serialize for Option<CompactBytes> {
+impl AsyncSerialize for Option<CompactBytes> {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
         W: AsyncWriteExt + Send + Unpin,
@@ -565,16 +565,16 @@ impl Uuid {
     }
 }
 
-impl WireSize for Uuid {
+impl Serialize for Uuid {
     const SIZE: usize = 16;
 
     #[inline]
-    fn size(&self, _version: i16) -> usize {
+    fn encode_size(&self, _version: i16) -> usize {
         Self::SIZE
     }
 }
 
-impl Serialize for Uuid {
+impl AsyncSerialize for Uuid {
     async fn write_into<W>(self, writer: &mut W, _version: i16) -> Result<()>
     where
         W: AsyncWriteExt + Send + Unpin,
@@ -584,14 +584,14 @@ impl Serialize for Uuid {
 }
 
 impl Deserialize for Uuid {
-    fn read_from<B: Buf>(buf: &mut B, _version: i16) -> Result<(Self, usize)> {
+    fn decode<B: Buf>(buf: &mut B, _version: i16) -> Result<(Self, usize)> {
         ensure!(buf.remaining() >= 16, "not enough bytes left");
         Ok((Self(buf.copy_to_bytes(16)), 16))
     }
 }
 
 impl AsyncDeserialize for Uuid {
-    async fn read<R>(reader: &mut R, _version: i16) -> Result<(Self, usize)>
+    async fn read_from<R>(reader: &mut R, _version: i16) -> Result<(Self, usize)>
     where
         R: AsyncReadExt + Send + Unpin,
     {
@@ -734,27 +734,27 @@ impl From<&StrBytes> for Str {
     }
 }
 
-impl WireSize for Str {
+impl Serialize for Str {
     // length encoded as INT16
     const SIZE: usize = 2;
 
     #[inline]
-    fn size(&self, _version: i16) -> usize {
+    fn encode_size(&self, _version: i16) -> usize {
         Self::SIZE + self.0.len()
     }
 }
 
-impl WireSize for Option<Str> {
+impl Serialize for Option<Str> {
     #[inline]
-    fn size(&self, version: i16) -> usize {
+    fn encode_size(&self, version: i16) -> usize {
         // NOTE: null strings still encode as -1 (INT16)
         self.as_ref()
-            .map(move |s| WireSize::size(s, version))
+            .map(move |s| Serialize::encode_size(s, version))
             .unwrap_or(2)
     }
 }
 
-impl Serialize for Str {
+impl AsyncSerialize for Str {
     async fn write_into<W>(self, writer: &mut W, _version: i16) -> Result<()>
     where
         W: AsyncWriteExt + Send + Unpin,
@@ -773,7 +773,7 @@ impl Serialize for Str {
     }
 }
 
-impl Serialize for Option<Str> {
+impl AsyncSerialize for Option<Str> {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
         W: AsyncWriteExt + Send + Unpin,
@@ -787,8 +787,8 @@ impl Serialize for Option<Str> {
 }
 
 impl Deserialize for Str {
-    fn read_from<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
-        let (Some(s), len) = Deserialize::read_from(buf, version)? else {
+    fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
+        let (Some(s), len) = Deserialize::decode(buf, version)? else {
             bail!("empty string");
         };
         Ok((s, len))
@@ -796,7 +796,7 @@ impl Deserialize for Str {
 }
 
 impl Deserialize for Option<Str> {
-    fn read_from<B: Buf>(buf: &mut B, _version: i16) -> Result<(Self, usize)> {
+    fn decode<B: Buf>(buf: &mut B, _version: i16) -> Result<(Self, usize)> {
         ensure!(buf.remaining() > 2, "not enough bytes left");
 
         let len = buf.get_i16();
@@ -818,11 +818,11 @@ impl Deserialize for Option<Str> {
 }
 
 impl AsyncDeserialize for Str {
-    async fn read<R>(reader: &mut R, version: i16) -> Result<(Self, usize)>
+    async fn read_from<R>(reader: &mut R, version: i16) -> Result<(Self, usize)>
     where
         R: AsyncReadExt + Send + Unpin,
     {
-        let (Some(s), len) = <Option<Str>>::read(reader, version).await? else {
+        let (Some(s), len) = <Option<Str>>::read_from(reader, version).await? else {
             bail!("empty string");
         };
         Ok((s, len))
@@ -830,7 +830,7 @@ impl AsyncDeserialize for Str {
 }
 
 impl AsyncDeserialize for Option<Str> {
-    async fn read<R>(reader: &mut R, _version: i16) -> Result<(Self, usize)>
+    async fn read_from<R>(reader: &mut R, _version: i16) -> Result<(Self, usize)>
     where
         R: AsyncReadExt + Send + Unpin,
     {
@@ -887,21 +887,21 @@ impl From<&StrBytes> for CompactStr {
 }
 
 // TODO: try to unify with impl WireSize for Str
-impl WireSize for CompactStr {
-    #[inline]
-    fn size(&self, version: i16) -> usize {
-        self.enc_len().size(version) + self.0.len()
-    }
-}
-
-impl WireSize for Option<CompactStr> {
-    #[inline]
-    fn size(&self, version: i16) -> usize {
-        self.as_ref().map_or(1, |s| s.size(version))
-    }
-}
-
 impl Serialize for CompactStr {
+    #[inline]
+    fn encode_size(&self, version: i16) -> usize {
+        self.enc_len().encode_size(version) + self.0.len()
+    }
+}
+
+impl Serialize for Option<CompactStr> {
+    #[inline]
+    fn encode_size(&self, version: i16) -> usize {
+        self.as_ref().map_or(1, |s| s.encode_size(version))
+    }
+}
+
+impl AsyncSerialize for CompactStr {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
         W: AsyncWriteExt + Send + Unpin,
@@ -918,7 +918,7 @@ impl Serialize for CompactStr {
     }
 }
 
-impl Serialize for Option<CompactStr> {
+impl AsyncSerialize for Option<CompactStr> {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
         W: AsyncWriteExt + Send + Unpin,
@@ -935,9 +935,9 @@ impl Serialize for Option<CompactStr> {
 }
 
 impl Deserialize for CompactStr {
-    fn read_from<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
+    fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
         let (UnsignedVarInt(len), n) =
-            UnsignedVarInt::read_from(buf, version).context("compact string length")?;
+            UnsignedVarInt::decode(buf, version).context("compact string length")?;
 
         let len = (len - 1) as usize;
 
@@ -952,11 +952,11 @@ impl Deserialize for CompactStr {
 }
 
 impl AsyncDeserialize for CompactStr {
-    async fn read<R>(reader: &mut R, version: i16) -> Result<(Self, usize)>
+    async fn read_from<R>(reader: &mut R, version: i16) -> Result<(Self, usize)>
     where
         R: AsyncReadExt + Send + Unpin,
     {
-        let (UnsignedVarInt(len), n) = UnsignedVarInt::read(reader, version)
+        let (UnsignedVarInt(len), n) = UnsignedVarInt::read_from(reader, version)
             .await
             .context("compact string length")?;
 
@@ -977,16 +977,16 @@ impl AsyncDeserialize for CompactStr {
 }
 
 // Array item helpers
-impl<T: WireSize> WireSize for &[T] {
+impl<T: Serialize> Serialize for &[T] {
     #[inline]
-    fn size(&self, version: i16) -> usize {
+    fn encode_size(&self, version: i16) -> usize {
         self.iter()
-            .map(|x| WireSize::size(x, version))
+            .map(|x| Serialize::encode_size(x, version))
             .sum::<usize>()
     }
 }
 
-impl<T: Serialize> Serialize for Vec<T> {
+impl<T: AsyncSerialize> AsyncSerialize for Vec<T> {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
         W: AsyncWriteExt + Send + Unpin,
@@ -1035,34 +1035,34 @@ impl<A> FromIterator<A> for Array<Vec<A>> {
     }
 }
 
-impl<T: WireSize> WireSize for Array<&[T]> {
+impl<T: Serialize> Serialize for Array<&[T]> {
     // array length encoded as INT32
     const SIZE: usize = 4;
 
     #[inline]
-    fn size(&self, version: i16) -> usize {
-        Self::SIZE + self.0.size(version)
+    fn encode_size(&self, version: i16) -> usize {
+        Self::SIZE + self.0.encode_size(version)
     }
 }
 
-impl<T: WireSize> WireSize for Array<Option<&[T]>> {
+impl<T: Serialize> Serialize for Array<Option<&[T]>> {
     const SIZE: usize = 4;
 
     #[inline]
-    fn size(&self, version: i16) -> usize {
+    fn encode_size(&self, version: i16) -> usize {
         self.0
-            .map_or(Self::SIZE, |array| Array(array).size(version))
+            .map_or(Self::SIZE, |array| Array(array).encode_size(version))
     }
 }
 
-impl<T: WireSize> WireSize for Array<&Option<Vec<T>>> {
+impl<T: Serialize> Serialize for Array<&Option<Vec<T>>> {
     #[inline]
-    fn size(&self, version: i16) -> usize {
-        Array(self.0.as_ref().map(|array| array.as_slice())).size(version)
+    fn encode_size(&self, version: i16) -> usize {
+        Array(self.0.as_ref().map(|array| array.as_slice())).encode_size(version)
     }
 }
 
-impl<T: Serialize> Serialize for Array<Vec<T>> {
+impl<T: AsyncSerialize> AsyncSerialize for Array<Vec<T>> {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
         W: AsyncWriteExt + Send + Unpin,
@@ -1077,7 +1077,7 @@ impl<T: Serialize> Serialize for Array<Vec<T>> {
     }
 }
 
-impl<T: Serialize> Serialize for Array<Option<Vec<T>>> {
+impl<T: AsyncSerialize> AsyncSerialize for Array<Option<Vec<T>>> {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
         W: AsyncWriteExt + Send + Unpin,
@@ -1092,8 +1092,8 @@ impl<T: Serialize> Serialize for Array<Option<Vec<T>>> {
 }
 
 impl<T: Deserialize> Deserialize for Array<Vec<T>> {
-    fn read_from<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
-        let (Array(Some(items)), size) = Deserialize::read_from(buf, version)? else {
+    fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
+        let (Array(Some(items)), size) = Deserialize::decode(buf, version)? else {
             bail!("invalid array length");
         };
         Ok((Array(items), size))
@@ -1101,8 +1101,8 @@ impl<T: Deserialize> Deserialize for Array<Vec<T>> {
 }
 
 impl<T: Deserialize> Deserialize for Array<Option<Vec<T>>> {
-    fn read_from<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
-        let (len, mut size) = i32::read_from(buf, version).context("array length")?;
+    fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
+        let (len, mut size) = i32::decode(buf, version).context("array length")?;
         ensure!(len >= -1, "invalid array length");
 
         if len == -1 {
@@ -1111,7 +1111,7 @@ impl<T: Deserialize> Deserialize for Array<Option<Vec<T>>> {
 
         let mut items = Vec::with_capacity(len as usize);
         for i in 0..len {
-            let (i, n) = T::read_from(buf, version).with_context(|| format!("array item {i}"))?;
+            let (i, n) = T::decode(buf, version).with_context(|| format!("array item {i}"))?;
             items.push(i);
             size += n;
         }
@@ -1121,11 +1121,12 @@ impl<T: Deserialize> Deserialize for Array<Option<Vec<T>>> {
 }
 
 impl<T: AsyncDeserialize> AsyncDeserialize for Array<Vec<T>> {
-    async fn read<R>(reader: &mut R, version: i16) -> Result<(Self, usize)>
+    async fn read_from<R>(reader: &mut R, version: i16) -> Result<(Self, usize)>
     where
         R: AsyncReadExt + Send + Unpin,
     {
-        let (Array(Some(items)), size) = <Array<Option<Vec<T>>>>::read(reader, version).await?
+        let (Array(Some(items)), size) =
+            <Array<Option<Vec<T>>>>::read_from(reader, version).await?
         else {
             bail!("invalid array length");
         };
@@ -1134,11 +1135,13 @@ impl<T: AsyncDeserialize> AsyncDeserialize for Array<Vec<T>> {
 }
 
 impl<T: AsyncDeserialize> AsyncDeserialize for Array<Option<Vec<T>>> {
-    async fn read<R>(reader: &mut R, version: i16) -> Result<(Self, usize)>
+    async fn read_from<R>(reader: &mut R, version: i16) -> Result<(Self, usize)>
     where
         R: AsyncReadExt + Send + Unpin,
     {
-        let (len, mut size) = i32::read(reader, version).await.context("array length")?;
+        let (len, mut size) = i32::read_from(reader, version)
+            .await
+            .context("array length")?;
         ensure!(len >= -1, "invalid array length");
 
         if len == -1 {
@@ -1147,7 +1150,7 @@ impl<T: AsyncDeserialize> AsyncDeserialize for Array<Option<Vec<T>>> {
 
         let mut items = Vec::with_capacity(len as usize);
         for i in 0..len {
-            let (i, n) = T::read(reader, version)
+            let (i, n) = T::read_from(reader, version)
                 .await
                 .with_context(|| format!("array item {i}"))?;
             items.push(i);
@@ -1192,28 +1195,29 @@ impl<A> FromIterator<A> for CompactArray<Vec<A>> {
     }
 }
 
-impl<T: WireSize> WireSize for CompactArray<&[T]> {
+impl<T: Serialize> Serialize for CompactArray<&[T]> {
     #[inline]
-    fn size(&self, version: i16) -> usize {
-        UnsignedVarInt(self.0.len() as u32 + 1).size(version) + self.0.size(version)
+    fn encode_size(&self, version: i16) -> usize {
+        UnsignedVarInt(self.0.len() as u32 + 1).encode_size(version) + self.0.encode_size(version)
     }
 }
 
-impl<T: WireSize> WireSize for CompactArray<Option<&[T]>> {
+impl<T: Serialize> Serialize for CompactArray<Option<&[T]>> {
     #[inline]
-    fn size(&self, version: i16) -> usize {
-        self.0.map_or(1, |array| CompactArray(array).size(version))
+    fn encode_size(&self, version: i16) -> usize {
+        self.0
+            .map_or(1, |array| CompactArray(array).encode_size(version))
     }
 }
 
-impl<T: WireSize> WireSize for CompactArray<&Option<Vec<T>>> {
+impl<T: Serialize> Serialize for CompactArray<&Option<Vec<T>>> {
     #[inline]
-    fn size(&self, version: i16) -> usize {
-        CompactArray(self.0.as_ref().map(|array| array.as_slice())).size(version)
+    fn encode_size(&self, version: i16) -> usize {
+        CompactArray(self.0.as_ref().map(|array| array.as_slice())).encode_size(version)
     }
 }
 
-impl<T: Serialize> Serialize for CompactArray<Vec<T>> {
+impl<T: AsyncSerialize> AsyncSerialize for CompactArray<Vec<T>> {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
         W: AsyncWriteExt + Send + Unpin,
@@ -1233,7 +1237,7 @@ impl<T: Serialize> Serialize for CompactArray<Vec<T>> {
     }
 }
 
-impl<T: Serialize> Serialize for CompactArray<Option<Vec<T>>> {
+impl<T: AsyncSerialize> AsyncSerialize for CompactArray<Option<Vec<T>>> {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
         W: AsyncWriteExt + Send + Unpin,
@@ -1251,8 +1255,8 @@ impl<T: Serialize> Serialize for CompactArray<Option<Vec<T>>> {
 }
 
 impl<T: Deserialize> Deserialize for CompactArray<Vec<T>> {
-    fn read_from<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
-        let (CompactArray(Some(items)), size) = Deserialize::read_from(buf, version)? else {
+    fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
+        let (CompactArray(Some(items)), size) = Deserialize::decode(buf, version)? else {
             bail!("invalid compact array length");
         };
         Ok((Self(items), size))
@@ -1260,9 +1264,9 @@ impl<T: Deserialize> Deserialize for CompactArray<Vec<T>> {
 }
 
 impl<T: Deserialize> Deserialize for CompactArray<Option<Vec<T>>> {
-    fn read_from<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
+    fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
         let (UnsignedVarInt(len), mut size) =
-            UnsignedVarInt::read_from(buf, version).context("compact array length")?;
+            UnsignedVarInt::decode(buf, version).context("compact array length")?;
 
         if len == 0 {
             return Ok((Self(None), size));
@@ -1271,7 +1275,7 @@ impl<T: Deserialize> Deserialize for CompactArray<Option<Vec<T>>> {
         let mut items = Vec::with_capacity((len - 1) as usize);
         for i in 0..(len - 1) {
             let (i, n) =
-                T::read_from(buf, version).with_context(|| format!("compact array item {i}"))?;
+                T::decode(buf, version).with_context(|| format!("compact array item {i}"))?;
             items.push(i);
             size += n;
         }
@@ -1281,12 +1285,12 @@ impl<T: Deserialize> Deserialize for CompactArray<Option<Vec<T>>> {
 }
 
 impl<T: AsyncDeserialize> AsyncDeserialize for CompactArray<Vec<T>> {
-    async fn read<R>(reader: &mut R, version: i16) -> Result<(Self, usize)>
+    async fn read_from<R>(reader: &mut R, version: i16) -> Result<(Self, usize)>
     where
         R: AsyncReadExt + Send + Unpin,
     {
         let (CompactArray(Some(items)), size) =
-            <CompactArray<Option<Vec<T>>>>::read(reader, version).await?
+            <CompactArray<Option<Vec<T>>>>::read_from(reader, version).await?
         else {
             bail!("invalid compact array length");
         };
@@ -1295,11 +1299,11 @@ impl<T: AsyncDeserialize> AsyncDeserialize for CompactArray<Vec<T>> {
 }
 
 impl<T: AsyncDeserialize> AsyncDeserialize for CompactArray<Option<Vec<T>>> {
-    async fn read<R>(reader: &mut R, version: i16) -> Result<(Self, usize)>
+    async fn read_from<R>(reader: &mut R, version: i16) -> Result<(Self, usize)>
     where
         R: AsyncReadExt + Send + Unpin,
     {
-        let (UnsignedVarInt(len), mut size) = UnsignedVarInt::read(reader, version)
+        let (UnsignedVarInt(len), mut size) = UnsignedVarInt::read_from(reader, version)
             .await
             .context("compact array length")?;
 
@@ -1309,7 +1313,7 @@ impl<T: AsyncDeserialize> AsyncDeserialize for CompactArray<Option<Vec<T>>> {
 
         let mut items = Vec::with_capacity((len - 1) as usize);
         for i in 0..(len - 1) {
-            let (i, n) = T::read(reader, version)
+            let (i, n) = T::read_from(reader, version)
                 .await
                 .with_context(|| format!("compact array item {i}"))?;
             items.push(i);
@@ -1334,20 +1338,20 @@ impl Default for TagBuffer {
     }
 }
 
-impl WireSize for TagBuffer {
-    fn size(&self, version: i16) -> usize {
+impl Serialize for TagBuffer {
+    fn encode_size(&self, version: i16) -> usize {
         self.0.iter().fold(
-            UnsignedVarInt(self.0.len() as u32).size(version),
+            UnsignedVarInt(self.0.len() as u32).encode_size(version),
             |size, (&k, v)| {
-                size + UnsignedVarInt(k as u32).size(version)
-                    + UnsignedVarInt(v.len() as u32).size(version)
+                size + UnsignedVarInt(k as u32).encode_size(version)
+                    + UnsignedVarInt(v.len() as u32).encode_size(version)
                     + v.len()
             },
         )
     }
 }
 
-impl Serialize for TagBuffer {
+impl AsyncSerialize for TagBuffer {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
         W: AsyncWriteExt + Send + Unpin,
@@ -1379,16 +1383,16 @@ impl Serialize for TagBuffer {
 }
 
 impl Deserialize for TagBuffer {
-    fn read_from<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
-        let (UnsignedVarInt(count), mut bytes) = UnsignedVarInt::read_from(buf, version)?;
+    fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
+        let (UnsignedVarInt(count), mut bytes) = UnsignedVarInt::decode(buf, version)?;
 
         let mut tag_buf = BTreeMap::new();
 
         for _ in 0..count {
-            let (UnsignedVarInt(tag), n) = UnsignedVarInt::read_from(buf, version)?;
+            let (UnsignedVarInt(tag), n) = UnsignedVarInt::decode(buf, version)?;
             bytes += n;
 
-            let (UnsignedVarInt(val_len), n) = UnsignedVarInt::read_from(buf, version)?;
+            let (UnsignedVarInt(val_len), n) = UnsignedVarInt::decode(buf, version)?;
             bytes += n;
 
             ensure!(buf.remaining() > val_len as usize, "not enough bytes left");
@@ -1402,19 +1406,19 @@ impl Deserialize for TagBuffer {
 }
 
 impl AsyncDeserialize for TagBuffer {
-    async fn read<R>(reader: &mut R, version: i16) -> Result<(Self, usize)>
+    async fn read_from<R>(reader: &mut R, version: i16) -> Result<(Self, usize)>
     where
         R: AsyncReadExt + Send + Unpin,
     {
-        let (UnsignedVarInt(count), mut bytes) = UnsignedVarInt::read(reader, version).await?;
+        let (UnsignedVarInt(count), mut bytes) = UnsignedVarInt::read_from(reader, version).await?;
 
         let mut tag_buf = BTreeMap::new();
 
         for _ in 0..count {
-            let (UnsignedVarInt(tag), n) = UnsignedVarInt::read(reader, version).await?;
+            let (UnsignedVarInt(tag), n) = UnsignedVarInt::read_from(reader, version).await?;
             bytes += n;
 
-            let (UnsignedVarInt(val_len), n) = UnsignedVarInt::read(reader, version).await?;
+            let (UnsignedVarInt(val_len), n) = UnsignedVarInt::read_from(reader, version).await?;
             bytes += n;
 
             let mut buf = BytesMut::with_capacity(val_len as usize);
