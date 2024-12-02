@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context as _, Result};
@@ -71,8 +72,7 @@ impl PartitionIndex {
 
 #[derive(Debug, Default)]
 struct TopicIndex {
-    // XXX: BTreeMap to keep them sorted
-    partitions: HashMap<i32, PartitionIndex>,
+    partitions: BTreeMap<i32, PartitionIndex>,
 }
 
 #[derive(Debug)]
@@ -121,18 +121,35 @@ impl Storage {
         Ok(Self { inner })
     }
 
-    pub async fn describe_topic(&self, topic: &StrBytes) -> Option<(Uuid, Vec<i32>)> {
+    pub async fn describe_topic(
+        &self,
+        topic: &StrBytes,
+        min_partition: i32,
+        partition_limit: usize,
+    ) -> Option<(Uuid, Vec<i32>, ControlFlow<Option<(StrBytes, i32)>>)> {
         let storage = self.inner.read().await;
 
         let topic = storage.topics.get(topic)?;
 
         let ix = storage.log_index.get(&topic.topic_id)?;
 
-        let mut partitions = ix.partitions.keys().copied().collect::<Vec<_>>();
-        // XXX: keep partitions sorted, so this is not necessary
-        partitions.sort_unstable();
+        let max_partition = min_partition + partition_limit as i32;
 
-        Some((topic.topic_id(), partitions))
+        // NOTE: range UB is intentionally inclusive to fetch next partition if limit is exceeded
+        let mut partitions = ix
+            .partitions
+            .range(min_partition..=max_partition)
+            .map(|(&partition, _)| partition)
+            .collect::<Vec<_>>();
+
+        // check if we exceeded the partition limit and determine where to continue in the future
+        let next = if partitions.len() > partition_limit {
+            ControlFlow::Break(partitions.pop().map(|p| (topic.name.clone(), p)))
+        } else {
+            ControlFlow::Continue(())
+        };
+
+        Some((topic.topic_id(), partitions, next))
     }
 
     // XXX: add version?

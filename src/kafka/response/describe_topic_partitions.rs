@@ -30,6 +30,14 @@ pub struct DescribeTopicPartitions {
     pub tagged_fields: TagBuffer,
 }
 
+impl DescribeTopicPartitions {
+    #[inline]
+    pub(crate) fn with_topic(mut self, topic: DescribeTopicPartitionsResponseTopic) -> Self {
+        self.topics.push(topic);
+        self
+    }
+}
+
 impl Serialize for DescribeTopicPartitions {
     const SIZE: usize = 4;
 
@@ -109,6 +117,11 @@ impl DescribeTopicPartitionsResponseTopic {
             topic_authorized_operations: -2147483648,
             tagged_fields: TagBuffer::default(),
         }
+    }
+
+    #[inline]
+    pub fn err(error_code: ErrorCode) -> Self {
+        Self::new(Uuid::zero()).with_err(error_code)
     }
 
     #[inline]

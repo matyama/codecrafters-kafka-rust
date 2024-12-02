@@ -2,13 +2,13 @@ use anyhow::{Context as _, Result};
 use bytes::Buf;
 use tokio::io::AsyncWriteExt;
 
-use crate::kafka::types::{CompactStr, TagBuffer};
+use crate::kafka::types::{CompactStr, StrBytes, TagBuffer};
 use crate::kafka::{AsyncSerialize, Deserialize, Serialize};
 
 #[derive(Debug, PartialEq)]
 pub struct Cursor {
     /// The name for the first topic to process. (API v0+)
-    pub topic_name: CompactStr,
+    pub topic_name: StrBytes,
     /// The partition index to start with. (API v0+)
     pub partition_index: i32,
     /// Other tagged fields. (API v0+)
@@ -26,7 +26,7 @@ impl Deserialize for Cursor {
         size += n;
 
         let cursor = Self {
-            topic_name,
+            topic_name: topic_name.into(),
             partition_index,
             tagged_fields,
         };
@@ -51,7 +51,7 @@ impl AsyncSerialize for Cursor {
     where
         W: AsyncWriteExt + Send + Unpin,
     {
-        self.topic_name
+        CompactStr::from(self.topic_name)
             .write_into(writer, version)
             .await
             .context("topic_name")?;
@@ -90,7 +90,7 @@ impl Serialize for Cursor {
 
     fn encode_size(&self, version: i16) -> usize {
         let mut size = Self::SIZE;
-        size += self.topic_name.encode_size(version);
+        size += CompactStr::from(&self.topic_name).encode_size(version);
         size += self.tagged_fields.encode_size(version);
         size
     }
