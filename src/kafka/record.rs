@@ -1,7 +1,7 @@
 use anyhow::{bail, ensure, Context as _, Result};
 use bytes::{Buf, Bytes};
 
-use crate::kafka::types::{Array, StrBytes, Uuid, VarInt, VarLong};
+use crate::kafka::types::{Array, CompactStr, StrBytes, TagBuffer, Uuid, VarInt, VarLong};
 use crate::kafka::Deserialize;
 
 //#[derive(Debug)]
@@ -115,8 +115,7 @@ pub fn decode_batch<B: Buf + std::fmt::Debug>(buf: &mut B) -> Result<RecordBatch
 }
 
 /// See official docs for [Record Batch](https://kafka.apache.org/documentation/#recordbatch).
-#[allow(dead_code)]
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct RecordBatch {
     pub base_offset: i64,
     pub batch_length: i32,
@@ -137,8 +136,7 @@ pub struct RecordBatch {
     pub records: Vec<Record>,
 }
 
-#[allow(dead_code)]
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct RecordBatchAttrs {
     /// bit 0~2
     pub compression: Compression,
@@ -175,8 +173,7 @@ impl TryFrom<i16> for RecordBatchAttrs {
 }
 
 /// See official docs for [Record](https://kafka.apache.org/documentation/#record).
-#[allow(dead_code)]
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct Record {
     pub length: usize,
     /// bit 0~7: unused
@@ -239,7 +236,7 @@ impl Deserialize for Record {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 #[repr(transparent)]
 pub struct RecordAttrs(pub i8);
 
@@ -250,7 +247,7 @@ impl Deserialize for RecordAttrs {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 #[repr(transparent)]
 pub struct RecordBytes(Option<Bytes>);
 
@@ -277,7 +274,7 @@ impl Deserialize for RecordBytes {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 #[repr(transparent)]
 struct Headers(Vec<Header>);
 
@@ -299,8 +296,7 @@ impl Deserialize for Headers {
 }
 
 /// See official docs for [Record Header](https://kafka.apache.org/documentation/#recordheader).
-#[allow(dead_code)]
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct Header {
     key: StrBytes,
     val: Option<Bytes>,
@@ -346,7 +342,7 @@ impl TryFrom<i16> for Compression {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum TimestampType {
     Create = 0,
     LogAppend = 1,
@@ -363,10 +359,10 @@ impl From<i16> for TimestampType {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Topic {
-    pub(crate) name: StrBytes,
-    pub(crate) topic_id: Uuid,
+    pub name: StrBytes,
+    pub topic_id: Uuid,
 }
 
 impl Topic {
@@ -376,31 +372,389 @@ impl Topic {
     }
 }
 
-impl Deserialize for Topic {
+impl From<TopicRecord> for Topic {
+    #[inline]
+    fn from(record: TopicRecord) -> Self {
+        Self {
+            name: record.topic_name,
+            topic_id: record.topic_id,
+        }
+    }
+}
+
+impl From<&TopicRecord> for Topic {
+    #[inline]
+    fn from(record: &TopicRecord) -> Self {
+        Self {
+            name: record.topic_name.clone(),
+            topic_id: record.topic_id.clone(),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub struct TopicRecord {
+    pub frame_version: i8,
+    pub type_: i8,
+    pub version: i8,
+    pub topic_name: StrBytes,
+    pub topic_id: Uuid,
+    pub tagged_fields: TagBuffer,
+}
+
+impl Deserialize for TopicRecord {
     fn read_from<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
-        // XXX: what exactly are these two bytes
-        let (_, mut size) = i16::deserialize(buf).context("topic header")?;
+        let (frame_version, mut size) = i8::read_from(buf, version).context("frame_version")?;
 
-        let (len, n) = i16::deserialize(buf).context("topic name length")?;
-        let len = len.saturating_sub(1) as usize;
+        let (type_, n) = i8::read_from(buf, version).context("type")?;
         size += n;
 
-        ensure!(buf.remaining() >= len, "not enough bytes");
-        let name = StrBytes::try_from(buf.copy_to_bytes(len)).context("topic name")?;
-        size += len;
-
-        //    //// XXX: topic names seem to be null byte terminated
-        //    let (name, n) = Str::deserialize(buf).context("topic name")?;
-        //    size += n;
-
-        let (topic_id, n) = Uuid::read_from(buf, version).context("topic id")?;
+        let (ver, n) = i8::read_from(buf, version).context("version")?;
         size += n;
 
-        // XXX: what exactly are these two bytes
-        ensure!(buf.has_remaining(), "not enough bytes left");
-        let (_, n) = i8::deserialize(buf).context("topic footer")?;
+        let (topic_name, n) = CompactStr::read_from(buf, version).context("topic_name")?;
         size += n;
 
-        Ok((Self { name, topic_id }, size))
+        let (topic_id, n) = Uuid::read_from(buf, version).context("topic_id")?;
+        size += n;
+
+        let (tagged_fields, n) = TagBuffer::read_from(buf, version).context("tagged_fields")?;
+        size += n;
+
+        let record = Self {
+            frame_version,
+            type_,
+            version: ver,
+            topic_name: topic_name.into(),
+            topic_id,
+            tagged_fields,
+        };
+
+        Ok((record, size))
+    }
+}
+
+#[derive(Default, PartialEq)]
+pub struct FeatureLevelRecord {
+    pub frame_version: i8,
+    pub type_: i8,
+    pub version: i8,
+    // CompactStr
+    pub name: StrBytes,
+    pub feature_level: i16,
+    pub tagged_fields: TagBuffer,
+}
+
+#[derive(Default, PartialEq)]
+pub struct PartitionRecord {
+    pub frame_version: i8,
+    pub type_: i8,
+    pub version: i8,
+    pub partition_id: i32,
+    pub topic_id: Uuid,
+    // CompactArray
+    pub replicas: Vec<i32>,
+    // CompactArray
+    pub isr: Vec<i32>,
+    // CompactArray
+    pub removing_replicas: Vec<i32>,
+    // CompactArray
+    pub adding_replicas: Vec<i32>,
+    pub leader_id: i32,
+    pub leader_epoch: i32,
+    pub partition_epoch: i32,
+    // CompactArray
+    pub directories: Vec<Uuid>,
+    pub tagged_fields: TagBuffer,
+}
+
+//#[derive(Clone, Copy, Debug, PartialEq)]
+//#[repr(i8)]
+//pub enum RecordType {
+//    Topic = 2,
+//    Partition = 3,
+//    FeatureLevel = 12,
+//}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decode_record_batch() {
+        let mut buf = Vec::new();
+
+        // Batch #1
+        buf.extend_from_slice(b"\x00\x00\x00\x00\x00\x00\x00\x00"); // base_offset
+        buf.extend_from_slice(b"\x00\x00\x00\x4f"); // batch_length
+        buf.extend_from_slice(b"\x00\x00\x00\x01"); // partition_leader_epoch
+        buf.extend_from_slice(b"\x02"); // magic
+        buf.extend_from_slice(b"\xb0\x69\x45\x7c"); // crc
+        buf.extend_from_slice(b"\x00\x00"); // attributes
+        buf.extend_from_slice(b"\x00\x00\x00\x00"); // last_offset_delta
+        buf.extend_from_slice(b"\x00\x00\x01\x91\xe0\x5a\xf8\x18"); // base_timestamp
+        buf.extend_from_slice(b"\x00\x00\x01\x91\xe0\x5a\xf8\x18"); // max_timestamp
+        buf.extend_from_slice(b"\xff\xff\xff\xff\xff\xff\xff\xff"); // producer_id
+        buf.extend_from_slice(b"\xff\xff"); // producer_epoch
+        buf.extend_from_slice(b"\xff\xff\xff\xff"); // base_sequence
+        buf.extend_from_slice(b"\x00\x00\x00\x01"); // records length
+
+        // Batch #1 > Record #1
+        buf.extend_from_slice(b"\x3a"); // length
+        buf.extend_from_slice(b"\x00"); // attributes
+        buf.extend_from_slice(b"\x00"); // timestamp_delta
+        buf.extend_from_slice(b"\x00"); // offset_delta
+        buf.extend_from_slice(b"\x01"); // key length
+        buf.extend_from_slice(b"\x2e"); // value length
+
+        let value1 = {
+            // Batch #1 > Record #1 > Value (Feature Level Record)
+            let mut val = Vec::with_capacity(23);
+            val.extend_from_slice(b"\x01"); // frame version
+            val.extend_from_slice(b"\x0c"); // type
+            val.extend_from_slice(b"\x00"); // version
+            val.extend_from_slice(b"\x11"); // name length & contents
+            val.extend_from_slice(
+                b"\x6d\x65\x74\x61\x64\x61\x74\x61\x2e\x76\x65\x72\x73\x69\x6f\x6e",
+            );
+            val.extend_from_slice(b"\x00\x14"); // feature_level
+            val.extend_from_slice(b"\x00"); // tagged_fields
+            Bytes::from(val)
+        };
+
+        buf.extend_from_slice(&value1); // value contents
+        buf.extend_from_slice(b"\x00"); // headers array count
+
+        //let value1 = FeatureLevelRecord {
+        //    frame_version: 1,
+        //    type_: 12,
+        //    version: 0,
+        //    name: "metadata.version".into(),
+        //    feature_level: 20,
+        //    tagged_fields: TagBuffer::default(),
+        //};
+
+        let batch1 = RecordBatch {
+            base_offset: 0,
+            batch_length: 79,
+            partition_leader_epoch: 1,
+            magic: 2,
+            crc: 2959689084,
+            attributes: RecordBatchAttrs {
+                compression: Compression::None,
+                timestamp_type: TimestampType::Create,
+                is_transactional: false,
+                is_control: false,
+                has_delete_horizon_ms: false,
+            },
+            last_offset_delta: 0,
+            base_timestamp: 1726045943832,
+            max_timestamp: 1726045943832,
+            producer_id: -1,
+            producer_epoch: -1,
+            base_sequence: -1,
+            records: vec![Record {
+                length: 29,
+                attributes: RecordAttrs(0),
+                timestamp_delta: 0,
+                offset_delta: 0,
+                key: None,
+                value: Some(value1),
+                headers: vec![],
+            }],
+        };
+
+        // Batch #2
+        buf.extend_from_slice(b"\x00\x00\x00\x00\x00\x00\x00\x01"); // base_offset
+        buf.extend_from_slice(b"\x00\x00\x00\xe4"); // batch_length
+        buf.extend_from_slice(b"\x00\x00\x00\x01"); // partition_leader_epoch
+        buf.extend_from_slice(b"\x02"); // magic
+        buf.extend_from_slice(b"\x24\xdb\x12\xdd"); // crc
+        buf.extend_from_slice(b"\x00\x00"); // attributes
+        buf.extend_from_slice(b"\x00\x00\x00\x02"); // last_offset_delta
+        buf.extend_from_slice(b"\x00\x00\x01\x91\xe0\x5b\x2d\x15"); // base_timestamp
+        buf.extend_from_slice(b"\x00\x00\x01\x91\xe0\x5b\x2d\x15"); // max_timestamp
+        buf.extend_from_slice(b"\xff\xff\xff\xff\xff\xff\xff\xff"); // producer_id
+        buf.extend_from_slice(b"\xff\xff"); // producer_epoch
+        buf.extend_from_slice(b"\xff\xff\xff\xff"); // base_sequence
+        buf.extend_from_slice(b"\x00\x00\x00\x03"); // records length
+
+        // Batch #2 > Record #1
+        buf.extend_from_slice(b"\x3c"); // length
+        buf.extend_from_slice(b"\x00"); // attributes
+        buf.extend_from_slice(b"\x00"); // timestamp_delta
+        buf.extend_from_slice(b"\x00"); // offset_delta
+        buf.extend_from_slice(b"\x01"); // key length
+        buf.extend_from_slice(b"\x30"); // value length
+
+        let value1 = {
+            // Batch #2 > Record #1 > Value (Topic Record)
+            let mut val = Vec::with_capacity(24);
+            val.extend_from_slice(b"\x01"); // frame version
+            val.extend_from_slice(b"\x02"); // type
+            val.extend_from_slice(b"\x00"); // version
+            val.extend_from_slice(b"\x04"); // topic name length
+            val.extend_from_slice(b"\x73\x61\x7a"); // topic name contents
+                                                    // topic UUID
+                                                    // 0x00-0000-4000-8000-000000000091
+            val.extend_from_slice(
+                b"\x00\x00\x00\x00\x00\x00\x40\x00\x80\x00\x00\x00\x00\x00\x00\x91",
+            );
+            val.extend_from_slice(b"\x00"); // tagged_fields
+            Bytes::from(val)
+        };
+
+        buf.extend_from_slice(&value1); // value contents
+        buf.extend_from_slice(b"\x00"); // headers array count
+
+        // Batch #2 > Record #2
+        buf.extend_from_slice(b"\x90\x01"); // length
+        buf.extend_from_slice(b"\x00"); // attributes
+        buf.extend_from_slice(b"\x00"); // timestamp_delta
+        buf.extend_from_slice(b"\x02"); // offset_delta
+        buf.extend_from_slice(b"\x01"); // key length
+        buf.extend_from_slice(b"\x82\x01"); // value length
+
+        let value2 = {
+            // Batch #2 > Record #2 > Value (Partition Record)
+            let mut val = Vec::with_capacity(65);
+
+            val.extend_from_slice(b"\x01"); // frame version
+            val.extend_from_slice(b"\x03"); // type
+            val.extend_from_slice(b"\x01"); // version
+            val.extend_from_slice(b"\x00\x00\x00\x00"); // partition_id
+                                                        // topic_id (0x00-0000-4000-8000-000000000091)
+            val.extend_from_slice(
+                b"\x00\x00\x00\x00\x00\x00\x40\x00\x80\x00\x00\x00\x00\x00\x00\x91",
+            );
+
+            val.extend_from_slice(b"\x02"); // length of replica array
+            val.extend_from_slice(b"\x00\x00\x00\x01"); // replica array
+
+            val.extend_from_slice(b"\x02"); // length of ISR array
+            val.extend_from_slice(b"\x00\x00\x00\x01"); // ISR array
+
+            val.extend_from_slice(b"\x01"); // length of removing replicas array
+            val.extend_from_slice(b"\x01"); // length of adding replicas array
+
+            val.extend_from_slice(b"\x00\x00\x00\x01"); // leader_id
+            val.extend_from_slice(b"\x00\x00\x00\x00"); // leader_epoch
+            val.extend_from_slice(b"\x00\x00\x00\x00"); // partition_epoch
+
+            val.extend_from_slice(b"\x02"); // length of directories array
+                                            // directory UUID (0x00000000-0000-4000-8000-000000000001)
+            val.extend_from_slice(
+                b"\x10\x00\x00\x00\x00\x00\x40\x00\x80\x00\x00\x00\x00\x00\x00\x01",
+            );
+
+            val.extend_from_slice(b"\x00"); // tagged_fields
+            Bytes::from(val)
+        };
+
+        buf.extend_from_slice(&value2); // value contents
+        buf.extend_from_slice(b"\x00"); // headers array count
+
+        // Batch #2 > Record #3
+        buf.extend_from_slice(b"\x90\x01"); // length
+        buf.extend_from_slice(b"\x00"); // attributes
+        buf.extend_from_slice(b"\x00"); // timestamp_delta
+        buf.extend_from_slice(b"\x04"); // offset_delta
+        buf.extend_from_slice(b"\x01"); // key length
+        buf.extend_from_slice(b"\x82\x01"); // value length
+
+        let value3 = {
+            // Batch #2 > Record #3 > Value (Partition Record)
+            let mut val = Vec::with_capacity(65);
+
+            val.extend_from_slice(b"\x01"); // frame version
+            val.extend_from_slice(b"\x03"); // type
+            val.extend_from_slice(b"\x01"); // version
+            val.extend_from_slice(b"\x00\x00\x00\x01"); // partition_id
+                                                        // topic_id (0x00000000-0000-4000-8000-000000000091)
+            val.extend_from_slice(
+                b"\x00\x00\x00\x00\x00\x00\x40\x00\x80\x00\x00\x00\x00\x00\x00\x91",
+            );
+
+            val.extend_from_slice(b"\x02"); // length of replica array
+            val.extend_from_slice(b"\x00\x00\x00\x01"); // replica array
+
+            val.extend_from_slice(b"\x02"); // length of ISR array
+            val.extend_from_slice(b"\x00\x00\x00\x01"); // ISR array
+
+            val.extend_from_slice(b"\x01"); // length of removing replicas array
+            val.extend_from_slice(b"\x01"); // length of adding replicas array
+
+            val.extend_from_slice(b"\x00\x00\x00\x01"); // leader_id
+            val.extend_from_slice(b"\x00\x00\x00\x00"); // leader_epoch
+            val.extend_from_slice(b"\x00\x00\x00\x00"); // partition_epoch
+
+            val.extend_from_slice(b"\x02"); // length of directories array
+                                            // directory UUID (0x10000000-0000-4000-8000-000000000001)
+            val.extend_from_slice(
+                b"\x10\x00\x00\x00\x00\x00\x40\x00\x80\x00\x00\x00\x00\x00\x00\x01",
+            );
+
+            val.extend_from_slice(b"\x00"); // tagged_fields
+            Bytes::from(val)
+        };
+
+        buf.extend_from_slice(&value3); // value contents
+        buf.extend_from_slice(b"\x00"); // headers array count
+
+        let batch2 = RecordBatch {
+            base_offset: 1,
+            batch_length: 228,
+            partition_leader_epoch: 1,
+            magic: 2,
+            crc: 618336989,
+            attributes: RecordBatchAttrs {
+                compression: Compression::None,
+                timestamp_type: TimestampType::Create,
+                is_transactional: false,
+                is_control: false,
+                has_delete_horizon_ms: false,
+            },
+            last_offset_delta: 2,
+            base_timestamp: 1726045957397,
+            max_timestamp: 1726045957397,
+            producer_id: -1,
+            producer_epoch: -1,
+            base_sequence: -1,
+            records: vec![
+                Record {
+                    length: 30,
+                    attributes: RecordAttrs(0),
+                    timestamp_delta: 0,
+                    offset_delta: 0,
+                    key: None,
+                    value: Some(value1),
+                    headers: vec![],
+                },
+                Record {
+                    length: 72,
+                    attributes: RecordAttrs(0),
+                    timestamp_delta: 0,
+                    offset_delta: 1,
+                    key: None,
+                    value: Some(value2),
+                    headers: vec![],
+                },
+                Record {
+                    length: 72,
+                    attributes: RecordAttrs(0),
+                    timestamp_delta: 0,
+                    offset_delta: 2,
+                    key: None,
+                    value: Some(value3),
+                    headers: vec![],
+                },
+            ],
+        };
+
+        let mut buf = std::io::Cursor::new(buf);
+
+        let expected = vec![batch1, batch2];
+        let actual = decode(&mut buf).expect("decode request batches");
+        assert_eq!(expected, actual);
     }
 }

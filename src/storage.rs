@@ -311,8 +311,8 @@ async fn discover_topics(cluster_metadata_dir: impl AsRef<Path>) -> Result<Vec<r
         .into_iter()
         .flat_map(|batch| batch.records)
         .filter_map(
-            |record| match record::Topic::deserialize(&mut record.value?) {
-                Ok((topic, _)) => Some(topic),
+            |record| match record::TopicRecord::deserialize(&mut record.value?) {
+                Ok((topic, _)) => Some(topic.into()),
                 _ => None,
             },
         )
