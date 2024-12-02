@@ -7,9 +7,11 @@ use crate::kafka::types::{Str, TagBuffer};
 use crate::kafka::{Deserialize, HeaderVersion};
 
 pub(crate) use api_versions::ApiVersions;
+pub(crate) use describe_topic_partitions::DescribeTopicPartitions;
 pub(crate) use fetch::Fetch;
 
 pub mod api_versions;
+pub mod describe_topic_partitions;
 pub mod fetch;
 
 #[derive(Debug)]
@@ -116,4 +118,5 @@ pub struct RequestMessage {
 pub enum RequestBody {
     ApiVersions(#[allow(dead_code)] ApiVersions),
     Fetch(Fetch),
+    DescribeTopicPartitions(DescribeTopicPartitions),
 }

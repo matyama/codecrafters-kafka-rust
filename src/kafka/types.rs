@@ -112,6 +112,25 @@ impl AsyncDeserialize for i32 {
     }
 }
 
+impl Serialize for i32 {
+    #[inline]
+    async fn write_into<W>(self, writer: &mut W, _version: i16) -> Result<()>
+    where
+        W: AsyncWriteExt + Send + Unpin,
+    {
+        writer.write_i32(self).await.context("i32")
+    }
+}
+
+impl WireSize for i32 {
+    const SIZE: usize = 4;
+
+    #[inline]
+    fn size(&self, _version: i16) -> usize {
+        Self::SIZE
+    }
+}
+
 impl Deserialize for i64 {
     fn read_from<B: Buf>(buf: &mut B, _version: i16) -> Result<(Self, usize)> {
         ensure!(buf.remaining() >= 8, "not enough bytes left");

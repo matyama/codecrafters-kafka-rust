@@ -115,6 +115,12 @@ impl Server {
                     .handle_message(&msg.header, body)
                     .await
             }
+
+            RequestBody::DescribeTopicPartitions(body) => {
+                handler::DescribeTopicPartitionsHandler::new(Arc::clone(&self.storage))
+                    .handle_message(&msg.header, body)
+                    .await
+            }
         }
         .with_context(|| format!("handle {api_key:?} v{api_version} request"))?;
 
@@ -156,6 +162,12 @@ impl Server {
 
             ApiKey::Fetch => {
                 handler::FetchHandler::new(Arc::clone(&self.storage))
+                    .handle_error(err)
+                    .await
+            }
+
+            ApiKey::DescribeTopicPartitions => {
+                handler::DescribeTopicPartitionsHandler::new(Arc::clone(&self.storage))
                     .handle_error(err)
                     .await
             }

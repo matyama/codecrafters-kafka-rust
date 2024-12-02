@@ -6,9 +6,11 @@ use crate::kafka::request::RequestHeader;
 use crate::kafka::response::ResponseBody;
 
 pub use api_versions::ApiVersionsHandler;
+pub use describe_topic_partitions::DescribeTopicPartitionsHandler;
 pub use fetch::FetchHandler;
 
 mod api_versions;
+mod describe_topic_partitions;
 mod fetch;
 
 // TODO: resolve async_fn_in_trait lint and remove the allow

@@ -11,6 +11,7 @@ pub(crate) use response::ResponseMessage;
 use error::{ErrorCode, KafkaError};
 
 pub(crate) mod api;
+pub(crate) mod common;
 pub(crate) mod error;
 pub(crate) mod record;
 pub(crate) mod request;
@@ -92,6 +93,13 @@ where
                     .with_context(|| format!("{api_key:?} v{api_version} message body"))?;
 
                 RequestBody::Fetch(body)
+            }
+
+            ApiKey::DescribeTopicPartitions => {
+                let (body, _) = request::DescribeTopicPartitions::read_from(&mut buf, api_version)
+                    .with_context(|| format!("{api_key:?} v{api_version} message body"))?;
+
+                RequestBody::DescribeTopicPartitions(body)
             }
 
             // NOTE: placeholder for unimplemented API requests

@@ -5,9 +5,11 @@ use crate::kafka::types::TagBuffer;
 use crate::kafka::{HeaderVersion, Serialize, WireSize};
 
 pub(crate) use api_versions::ApiVersions;
+pub(crate) use describe_topic_partitions::DescribeTopicPartitions;
 pub(crate) use fetch::Fetch;
 
 pub mod api_versions;
+pub mod describe_topic_partitions;
 pub mod fetch;
 
 #[derive(Debug)]
@@ -85,8 +87,8 @@ impl Serialize for ResponseMessage {
 #[derive(Debug)]
 pub enum ResponseBody {
     ApiVersions(ApiVersions),
-    #[allow(dead_code)]
     Fetch(Fetch),
+    DescribeTopicPartitions(DescribeTopicPartitions),
 }
 
 impl HeaderVersion for ResponseBody {
@@ -96,6 +98,7 @@ impl HeaderVersion for ResponseBody {
             // Tagged fields are only supported in the body but not in the header.
             Self::ApiVersions(_) => 0,
             Self::Fetch(_) if api_version >= 12 => 1,
+            Self::DescribeTopicPartitions(_) => 0,
             _ => 0,
         }
     }
@@ -109,6 +112,7 @@ impl Serialize for ResponseBody {
         match self {
             Self::ApiVersions(body) => body.write_into(writer, version).await,
             Self::Fetch(body) => body.write_into(writer, version).await,
+            Self::DescribeTopicPartitions(body) => body.write_into(writer, version).await,
         }
     }
 }

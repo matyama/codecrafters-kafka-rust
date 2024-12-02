@@ -122,6 +122,7 @@ impl ApiKey {
             //Self::Produce => Some(ApiVersion(0)..=ApiVersion(11)),
             Self::Fetch => Some(ApiVersion(0)..=ApiVersion(16)),
             Self::ApiVersions => Some(ApiVersion(0)..=ApiVersion(4)),
+            Self::DescribeTopicPartitions => Some(ApiVersion(0)..=ApiVersion(0)),
             _ => None,
         }
     }
@@ -135,6 +136,7 @@ impl HeaderVersion for ApiKey {
             Self::ApiVersions => 1,
             Self::Fetch if api_version >= 12 => 2,
             Self::Fetch => 1,
+            Self::DescribeTopicPartitions => 2,
             _ => 0,
         }
     }
