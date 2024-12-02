@@ -555,6 +555,11 @@ impl Uuid {
     }
 
     #[inline]
+    pub const fn zero() -> Self {
+        Self::from_static(&[0; Self::SIZE])
+    }
+
+    #[inline]
     pub(crate) fn as_hex(&self) -> UuidHex<'_> {
         UuidHex(&self.0)
     }
@@ -633,7 +638,7 @@ impl TryFrom<StrBytes> for Uuid {
 ///
 /// Note that this is rather a helper type. For wire-serialized types use either [`Str`] or
 /// [`CompactStr`].
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub struct StrBytes(Bytes);
 
@@ -642,6 +647,21 @@ impl StrBytes {
     pub fn as_str(&self) -> &str {
         // SAFETY: StrBytes as UTF-8 encoded by construction
         unsafe { std::str::from_utf8_unchecked(&self.0) }
+    }
+}
+
+impl From<String> for StrBytes {
+    fn from(s: String) -> Self {
+        let mut bytes = s.into_bytes();
+        bytes.shrink_to_fit();
+        Self(Bytes::from(bytes))
+    }
+}
+
+impl From<&str> for StrBytes {
+    #[inline]
+    fn from(s: &str) -> Self {
+        Self::from(s.to_string())
     }
 }
 
@@ -836,7 +856,7 @@ impl AsyncDeserialize for Option<Str> {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 #[repr(transparent)]
 pub struct CompactStr(Bytes);
 
@@ -1303,7 +1323,7 @@ impl<T: AsyncDeserialize> AsyncDeserialize for CompactArray<Option<Vec<T>>> {
 /// TAG_BUFFER [KIP-482][KIP]
 ///
 /// [KIP]: https://cwiki.apache.org/confluence/display/KAFKA/KIP-482%3A+The+Kafka+Protocol+should+Support+Optional+Tagged+Fields
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 #[repr(transparent)]
 pub struct TagBuffer(BTreeMap<i32, Bytes>);
 

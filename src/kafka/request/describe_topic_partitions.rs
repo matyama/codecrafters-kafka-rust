@@ -1,4 +1,4 @@
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Context as _, Result};
 use bytes::Buf;
 
 use crate::kafka::common::Cursor;
@@ -10,8 +10,7 @@ use crate::kafka::Deserialize;
 /// [Request schema][schema]
 ///
 /// [schema]: https://github.com/apache/kafka/blob/trunk/clients/src/main/resources/common/message/DescribeTopicPartitionsRequest.json
-#[allow(dead_code)]
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct DescribeTopicPartitions {
     /// The topics to fetch details for. (API v0+)
     pub topics: Vec<TopicRequest>,
@@ -27,16 +26,17 @@ impl Deserialize for DescribeTopicPartitions {
     fn read_from<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
         let mut body_bytes = 0;
 
-        let (CompactArray(topics), n) = CompactArray::read_from(buf, version)?;
+        let (CompactArray(topics), n) = CompactArray::read_from(buf, version).context("topics")?;
         body_bytes += n;
 
-        let (response_partition_limit, n) = i32::read_from(buf, version)?;
+        let (response_partition_limit, n) =
+            i32::read_from(buf, version).context("response_partition_limit")?;
         body_bytes += n;
 
-        let (cursor, n) = Deserialize::read_from(buf, version)?;
+        let (cursor, n) = Deserialize::read_from(buf, version).context("cursor")?;
         body_bytes += n;
 
-        let (tagged_fields, n) = TagBuffer::read_from(buf, version)?;
+        let (tagged_fields, n) = TagBuffer::read_from(buf, version).context("tagged_fields")?;
         body_bytes += n;
 
         ensure!(
@@ -55,7 +55,7 @@ impl Deserialize for DescribeTopicPartitions {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct TopicRequest {
     /// The topic name. (API v0+)
     pub name: StrBytes,
@@ -65,9 +65,9 @@ pub struct TopicRequest {
 
 impl Deserialize for TopicRequest {
     fn read_from<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
-        let (name, mut size) = CompactStr::read_from(buf, version)?;
+        let (name, mut size) = CompactStr::read_from(buf, version).context("name")?;
 
-        let (tagged_fields, n) = TagBuffer::read_from(buf, version)?;
+        let (tagged_fields, n) = TagBuffer::read_from(buf, version).context("tagged_fields")?;
         size += n;
 
         let req = Self {
@@ -76,5 +76,44 @@ impl Deserialize for TopicRequest {
         };
 
         Ok((req, size))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deserialize_topic() {
+        let expected = TopicRequest {
+            name: "foo".into(),
+            tagged_fields: TagBuffer::default(),
+        };
+        let mut buf = b"\x04\x66\x6f\x6f\x00".as_slice();
+        let (actual, n) = TopicRequest::deserialize(&mut buf).expect("valid topic request");
+        assert_eq!(5, n);
+        assert_eq!(expected, actual);
+    }
+
+    #[test]
+    fn deserialize_request_body() {
+        let expected = DescribeTopicPartitions {
+            topics: vec![TopicRequest {
+                name: "foo".into(),
+                tagged_fields: TagBuffer::default(),
+            }],
+            response_partition_limit: 100,
+            cursor: None,
+            tagged_fields: TagBuffer::default(),
+        };
+
+        let mut buf = b"\x02\x04\x66\x6f\x6f\x00\x00\x00\x00\x64\xff\x00".as_slice();
+        let expected_size = buf.len();
+
+        let (actual, actual_size) =
+            DescribeTopicPartitions::deserialize(&mut buf).expect("valid request");
+
+        assert_eq!(expected_size, actual_size);
+        assert_eq!(expected, actual);
     }
 }

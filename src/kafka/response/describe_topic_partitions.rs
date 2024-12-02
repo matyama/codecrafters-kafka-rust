@@ -3,7 +3,7 @@ use tokio::io::AsyncWriteExt;
 
 use crate::kafka::common::Cursor;
 use crate::kafka::error::ErrorCode;
-use crate::kafka::types::{CompactArray, CompactStr, TagBuffer, Uuid};
+use crate::kafka::types::{CompactArray, CompactStr, StrBytes, TagBuffer, Uuid};
 use crate::kafka::{Serialize, WireSize};
 
 /// # ApiVersions Request
@@ -101,7 +101,7 @@ impl DescribeTopicPartitionsResponseTopic {
     #[inline]
     pub fn new(topic_id: Uuid) -> Self {
         Self {
-            error_code: ErrorCode::default(),
+            error_code: ErrorCode::NONE,
             name: None,
             topic_id,
             is_internal: false,
@@ -109,6 +109,18 @@ impl DescribeTopicPartitionsResponseTopic {
             topic_authorized_operations: -2147483648,
             tagged_fields: TagBuffer::default(),
         }
+    }
+
+    #[inline]
+    pub fn with_err(mut self, error_code: ErrorCode) -> Self {
+        self.error_code = error_code;
+        self
+    }
+
+    #[inline]
+    pub fn with_name(mut self, name: StrBytes) -> Self {
+        self.name = Some(name.into());
+        self
     }
 }
 
@@ -179,7 +191,7 @@ pub struct DescribeTopicPartitionsResponsePartition {
     /// The ID of the leader broker. (API v0+)
     pub leader_id: i32,
 
-    /// The leader epoch of this partition. (API v0+)
+    /// The leader epoch of this partition. (API v0+, default: -1)
     pub leader_epoch: i32,
 
     /// The set of all nodes that host this partition. (API v0+)
@@ -188,10 +200,10 @@ pub struct DescribeTopicPartitionsResponsePartition {
     /// The set of nodes that are in sync with the leader for this partition. (API v0+)
     pub isr_nodes: Vec<i32>,
 
-    /// The new eligible leader replicas otherwise. (API v0+, nullable v0+)
+    /// The new eligible leader replicas otherwise. (API v0+, nullable v0+, default: None)
     pub eligible_leader_replicas: Option<Vec<i32>>,
 
-    /// The last known ELR. (API v0+, nullable v0+)
+    /// The last known ELR. (API v0+, nullable v0+, default: None)
     pub last_known_elr: Option<Vec<i32>>,
 
     /// The set of offline replicas of this partition. (API v0+)
@@ -199,6 +211,25 @@ pub struct DescribeTopicPartitionsResponsePartition {
 
     /// Other tagged fields. (API v0+)
     pub tagged_fields: TagBuffer,
+}
+
+impl DescribeTopicPartitionsResponsePartition {
+    #[inline]
+    pub(crate) fn new(partition_index: i32) -> Self {
+        Self {
+            error_code: ErrorCode::NONE,
+            partition_index,
+            // TODO: default value
+            leader_id: 0,
+            leader_epoch: -1,
+            replica_nodes: Vec::new(),
+            isr_nodes: Vec::new(),
+            eligible_leader_replicas: None,
+            last_known_elr: None,
+            offline_replicas: Vec::new(),
+            tagged_fields: TagBuffer::default(),
+        }
+    }
 }
 
 impl WireSize for DescribeTopicPartitionsResponsePartition {
@@ -272,5 +303,115 @@ impl Serialize for DescribeTopicPartitionsResponsePartition {
             .context("tagged_fields")?;
 
         Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
+#[repr(i8)]
+pub enum AclOperation {
+    Unknown = 0,
+    Any = 1,
+    All = 2,
+    Read = 3,
+    Write = 4,
+    Create = 5,
+    Delete = 6,
+    Alter = 7,
+    Describe = 8,
+    ClusterAction = 9,
+    DescribeConfigs = 10,
+    AlterConfigs = 11,
+    IdempotentWrite = 12,
+    CreateTokens = 13,
+    DescribeTokens = 14,
+}
+
+impl std::ops::BitOr<AclOperation> for i32 {
+    type Output = Self;
+
+    #[inline]
+    fn bitor(self, rhs: AclOperation) -> Self::Output {
+        self | (1 << rhs as i8 as i32)
+    }
+}
+
+impl std::ops::BitOr<AclOperation> for AclOperation {
+    type Output = i32;
+
+    #[inline]
+    fn bitor(self, rhs: AclOperation) -> Self::Output {
+        0 | self | rhs
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn acl_operations() {
+        use AclOperation::*;
+
+        let expected = 3576;
+
+        let actual =
+            Read | Write | Create | Delete | Alter | Describe | DescribeConfigs | AlterConfigs;
+
+        assert_eq!(
+            expected, actual,
+            "expected={expected:#010x} ({expected:#018b}) actual={actual:#010x} ({actual:#018b})"
+        );
+    }
+
+    #[tokio::test]
+    async fn serialize_error_response() {
+        use AclOperation::*;
+
+        let topic_authorized_operations =
+            Read | Write | Create | Delete | Alter | Describe | DescribeConfigs | AlterConfigs;
+
+        let response = DescribeTopicPartitions {
+            throttle_time_ms: 0,
+            topics: vec![DescribeTopicPartitionsResponseTopic {
+                error_code: ErrorCode::UNKNOWN_TOPIC_OR_PARTITION,
+                name: Some(StrBytes::from("foo").into()),
+                topic_id: Uuid::zero(),
+                is_internal: false,
+                partitions: vec![],
+                topic_authorized_operations,
+                tagged_fields: TagBuffer::default(),
+            }],
+            cursor: None,
+            tagged_fields: TagBuffer::default(),
+        };
+
+        let mut expected = Vec::new();
+        expected.extend_from_slice(b"\x00\x00\x00\x00"); // throttle_time_ms
+        expected.extend_from_slice(b"\x02"); // topics array length
+        expected.extend_from_slice(b"\x00\x03"); // topic #1 error code
+        expected.extend_from_slice(b"\x04"); // topic #1 name length
+        expected.extend_from_slice(b"\x66\x6f\x6f"); // topic #1 name contents
+                                                     // topic #1 UUID
+        expected
+            .extend_from_slice(b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00");
+        expected.extend_from_slice(b"\x00"); // topic #1 is_internal
+        expected.extend_from_slice(b"\x01"); // topic #1 partitions array
+        expected.extend_from_slice(b"\x00\x00\x0d\xf8"); // topic #1 topic_authorized_operations
+        expected.extend_from_slice(b"\x00"); // topic #1 tagged_fields
+        expected.extend_from_slice(b"\xff"); // next cursor
+        expected.extend_from_slice(b"\x00"); // tagged_fields
+
+        let mut writer = Cursor::new(Vec::new());
+
+        response
+            .write_into(&mut writer, 1)
+            .await
+            .expect("response serialized");
+
+        let actual = writer.into_inner();
+
+        assert_eq!(expected, actual);
     }
 }

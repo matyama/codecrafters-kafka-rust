@@ -98,7 +98,7 @@ impl HeaderVersion for ResponseBody {
             // Tagged fields are only supported in the body but not in the header.
             Self::ApiVersions(_) => 0,
             Self::Fetch(_) if api_version >= 12 => 1,
-            Self::DescribeTopicPartitions(_) => 0,
+            Self::DescribeTopicPartitions(_) => 1,
             _ => 0,
         }
     }

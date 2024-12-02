@@ -365,16 +365,11 @@ impl From<i16> for TimestampType {
 
 #[derive(Clone, Debug)]
 pub struct Topic {
-    name: StrBytes,
-    topic_id: Uuid,
+    pub(crate) name: StrBytes,
+    pub(crate) topic_id: Uuid,
 }
 
 impl Topic {
-    #[inline]
-    pub(crate) fn name(&self) -> &str {
-        self.name.as_str()
-    }
-
     #[inline]
     pub(crate) fn topic_id(&self) -> Uuid {
         self.topic_id.clone()

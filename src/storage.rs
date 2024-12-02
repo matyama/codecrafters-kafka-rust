@@ -9,15 +9,9 @@ use tokio::sync::{Mutex, MutexGuard, RwLock};
 use tokio::task::JoinSet;
 
 use crate::kafka::record::{self, Topic};
-use crate::kafka::types::Uuid;
+use crate::kafka::types::{StrBytes, Uuid};
 use crate::kafka::Deserialize;
 use crate::logs::LogDir;
-
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct TopicPartition {
-    topic: Uuid,
-    partition: i32,
-}
 
 #[derive(Debug)]
 struct LogFile {
@@ -75,12 +69,20 @@ impl PartitionIndex {
     }
 }
 
+#[derive(Debug, Default)]
+struct TopicIndex {
+    // XXX: BTreeMap to keep them sorted
+    partitions: HashMap<i32, PartitionIndex>,
+}
+
 #[derive(Debug)]
 pub struct StorageInner {
     #[allow(dead_code)]
     log_dirs: Vec<LogDir>,
     /// (topic id, partition) -> ({base offset -> log file}, ..metadata)
-    log_index: HashMap<TopicPartition, PartitionIndex>,
+    log_index: HashMap<Uuid, TopicIndex>,
+    /// Topic IDs by names
+    topics: HashMap<StrBytes, Topic>,
     // TODO: similar mapping to `log_index` for the __cluster_metadata logs (`metadata_index`)
 }
 
@@ -90,6 +92,11 @@ impl StorageInner {
             .await
             .context("find topics in cluster metadata")?;
 
+        let topics = topics
+            .into_iter()
+            .map(|topic| (topic.name.clone(), topic))
+            .collect::<HashMap<_, _>>();
+
         let log_index = index_logs(&log_dirs, &topics)
             .await
             .context("indexing partition logs")?;
@@ -97,6 +104,7 @@ impl StorageInner {
         Ok(Self {
             log_dirs,
             log_index,
+            topics,
         })
     }
 }
@@ -113,6 +121,20 @@ impl Storage {
         Ok(Self { inner })
     }
 
+    pub async fn describe_topic(&self, topic: &StrBytes) -> Option<(Uuid, Vec<i32>)> {
+        let storage = self.inner.read().await;
+
+        let topic = storage.topics.get(topic)?;
+
+        let ix = storage.log_index.get(&topic.topic_id)?;
+
+        let mut partitions = ix.partitions.keys().copied().collect::<Vec<_>>();
+        // XXX: keep partitions sorted, so this is not necessary
+        partitions.sort_unstable();
+
+        Some((topic.topic_id(), partitions))
+    }
+
     // XXX: add version?
     pub async fn fetch_records(
         &self,
@@ -122,9 +144,11 @@ impl Storage {
     ) -> Result<FetchResult> {
         let storage = self.inner.read().await;
 
-        let tp = TopicPartition { topic, partition };
+        let Some(topic_ix) = storage.log_index.get(&topic) else {
+            return Ok(FetchResult::UnknownTopic);
+        };
 
-        let Some(ix) = storage.log_index.get(&tp) else {
+        let Some(ix) = topic_ix.partitions.get(&partition) else {
             return Ok(FetchResult::UnknownTopic);
         };
 
@@ -142,7 +166,7 @@ impl Storage {
         let _ = log_file.read_to_end(&mut buf).await.with_context(|| {
             format!(
                 "failed to fetch records for ({}, {partition}, {offset})",
-                tp.topic.as_hex()
+                topic.as_hex()
             )
         });
 
@@ -164,14 +188,8 @@ pub enum FetchResult {
 
 async fn index_logs(
     log_dirs: &[LogDir],
-    topics: &[Topic],
-) -> Result<HashMap<TopicPartition, PartitionIndex>> {
-    // XXX: return this from lookup_topics
-    let topics = topics
-        .iter()
-        .map(|topic| (topic.name(), topic))
-        .collect::<HashMap<_, _>>();
-
+    topics: &HashMap<StrBytes, Topic>,
+) -> Result<HashMap<Uuid, TopicIndex>> {
     let mut index = HashMap::new();
 
     let partition_dirs = log_dirs.iter().flat_map(|dir| {
@@ -182,19 +200,18 @@ async fn index_logs(
 
     for dir in partition_dirs {
         let (topic, partition) = dir.topic_partition()?;
+        let topic = StrBytes::from(topic);
 
-        let Some(topic) = topics.get(topic) else {
+        let Some(topic) = topics.get(&topic) else {
             bail!("topic '{topic:?}' not found in cluster metadata");
         };
 
         // NOTE: specifically taking the topic id from the cluster metadata here
-        let tp = TopicPartition {
-            topic: topic.topic_id(),
-            partition,
-        };
+        let ix: &mut TopicIndex = index.entry(topic.topic_id()).or_default();
 
-        let ix = index
-            .entry(tp)
+        let ix = ix
+            .partitions
+            .entry(partition)
             .or_insert_with(|| PartitionIndex::new(&dir.path));
 
         index_partition(ix)

@@ -2,9 +2,10 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
-use crate::kafka::error::KafkaError;
+use crate::kafka::error::{ErrorCode, KafkaError};
 use crate::kafka::request::{self, RequestHeader};
-use crate::kafka::response::{self, ResponseBody};
+use crate::kafka::response::{self, describe_topic_partitions::*, ResponseBody};
+use crate::kafka::types::Uuid;
 use crate::kafka::{ApiKey, WireSize as _};
 use crate::storage::Storage;
 
@@ -30,22 +31,37 @@ impl Handler for DescribeTopicPartitionsHandler {
     async fn handle_message(
         &self,
         header: &RequestHeader,
-        _body: Self::RequestBody,
+        body: Self::RequestBody,
     ) -> Result<(usize, ResponseBody)> {
         let version = header.request_api_version.into_inner();
 
-        // TODO
-        //let mut topics = Vec::new();
+        let mut topics = Vec::with_capacity(body.topics.len());
 
-        //for _ in 0..10 {
-        //    let topic_id = todo!();
-        //    let topic = DescribeTopicPartitionsResponseTopic::new(topic_id);
-        //    topics.push(topic);
-        //}
+        // TODO: respect body.response_partition_limit and use Cursor
+        for topic in body.topics {
+            let topic = match self.storage.describe_topic(&topic.name).await {
+                Some((topic_id, partititons)) => {
+                    let mut topic =
+                        DescribeTopicPartitionsResponseTopic::new(topic_id).with_name(topic.name);
+
+                    topic.partitions = partititons
+                        .into_iter()
+                        .map(DescribeTopicPartitionsResponsePartition::new)
+                        .collect();
+
+                    topic
+                }
+                None => DescribeTopicPartitionsResponseTopic::new(Uuid::zero())
+                    .with_name(topic.name)
+                    .with_err(ErrorCode::UNKNOWN_TOPIC_OR_PARTITION),
+            };
+
+            topics.push(topic);
+        }
 
         let body = response::DescribeTopicPartitions {
             throttle_time_ms: 0,
-            topics: Vec::new(),
+            topics,
             cursor: None,
             ..Default::default()
         };

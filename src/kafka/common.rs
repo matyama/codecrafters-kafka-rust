@@ -5,7 +5,7 @@ use tokio::io::AsyncWriteExt;
 use crate::kafka::types::{CompactStr, TagBuffer};
 use crate::kafka::{Deserialize, Serialize, WireSize};
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct Cursor {
     /// The name for the first topic to process. (API v0+)
     pub topic_name: CompactStr,
@@ -37,8 +37,8 @@ impl Deserialize for Cursor {
 
 impl Deserialize for Option<Cursor> {
     fn read_from<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
-        let (present, n) = bool::read_from(buf, version)?;
-        if present {
+        let (present, n) = i8::read_from(buf, version)?;
+        if present == 1 {
             Cursor::read_from(buf, version).map(|(cursor, size)| (Some(cursor), size + n))
         } else {
             Ok((None, n))
@@ -100,5 +100,18 @@ impl WireSize for Option<Cursor> {
     #[inline]
     fn size(&self, version: i16) -> usize {
         self.as_ref().map_or(1, |c| c.size(version))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn null_cursor() {
+        let mut buf = b"\xff".as_slice();
+        let (cursor, n) = <Option<Cursor>>::deserialize(&mut buf).expect("valid null cursor");
+        assert_eq!(n, 1);
+        assert_eq!(cursor, None);
     }
 }
