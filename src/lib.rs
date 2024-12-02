@@ -44,7 +44,8 @@ impl Server {
             .await
             .context("initializing storage")?;
 
-        println!("Initialized storage: {storage:?}");
+        println!("Storage initialized");
+        //println!("Initialized storage: {storage:?}");
 
         Ok(Self {
             storage: Arc::new(storage),

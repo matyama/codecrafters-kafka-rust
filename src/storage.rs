@@ -9,7 +9,7 @@ use tokio::io::AsyncReadExt as _;
 use tokio::sync::{Mutex, MutexGuard, RwLock};
 use tokio::task::JoinSet;
 
-use crate::kafka::record::{self, Topic};
+use crate::kafka::record::{RecordBatch, Topic, TopicRecord};
 use crate::kafka::types::{StrBytes, Uuid};
 use crate::kafka::Deserialize;
 use crate::logs::LogDir;
@@ -166,11 +166,11 @@ impl Storage {
     }
 
     // XXX: add version?
-    /// Fetch a record segment containing given `offset` for the `topic` and `partition`.
+    /// Fetch a record batch containing given `offset` for the `topic` and `partition`.
     ///
-    /// Note that this returns a raw log segment (file contents). This means that
-    ///  1. There can (and most likely will) be multiple records returned, all inside a record
-    ///     batch that includes given `offset`.
+    /// Note that this returns batch of raw records (file contents). This means that
+    ///  1. There can (and most likely will) be multiple records returned, all inside the record
+    ///     batch which includes given `offset`.
     ///  2. Record batches can in general contain offsets _smaller_ than the `offset` and it's up
     ///     to the consumer to filter these out.
     pub async fn fetch_records(
@@ -305,7 +305,7 @@ async fn index_partition(index: &mut PartitionIndex) -> Result<()> {
     Ok(())
 }
 
-async fn lookup_topics(log_dirs: &[LogDir]) -> Result<Vec<record::Topic>> {
+async fn lookup_topics(log_dirs: &[LogDir]) -> Result<Vec<Topic>> {
     let cluster_metadata_dirs = log_dirs.iter().flat_map(|log_dir| {
         log_dir
             .partitions
@@ -325,14 +325,16 @@ async fn lookup_topics(log_dirs: &[LogDir]) -> Result<Vec<record::Topic>> {
         match result {
             Ok(Ok(ts)) => topics.extend(ts),
             Ok(Err(e)) => bail!(e),
-            Err(e) => bail!(e),
+            Err(e) if e.is_cancelled() => tokio::task::yield_now().await,
+            Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+            Err(e) => unreachable!("task neither panicked nor has been canceled: {e:?}"),
         }
     }
 
     Ok(topics)
 }
 
-async fn discover_topics(cluster_metadata_dir: impl AsRef<Path>) -> Result<Vec<record::Topic>> {
+async fn discover_topics(cluster_metadata_dir: impl AsRef<Path>) -> Result<Vec<Topic>> {
     let log_file = load_last_log_file(cluster_metadata_dir)
         .await
         .context("load last cluster metadata log")?;
@@ -341,14 +343,14 @@ async fn discover_topics(cluster_metadata_dir: impl AsRef<Path>) -> Result<Vec<r
         return Ok(Vec::new());
     };
 
-    let segment = record::decode(&mut log_file.as_slice())?;
+    let (segment, _) = <Vec<RecordBatch>>::deserialize(&mut log_file.as_slice())?;
     //println!("loaded segment: {segment:?}");
 
     let topics = segment
         .into_iter()
         .flat_map(|batch| batch.records)
         .filter_map(
-            |record| match record::TopicRecord::deserialize(&mut record.value?) {
+            |record| match TopicRecord::deserialize(&mut record.value?) {
                 Ok((topic, _)) => Some(topic.into()),
                 _ => None,
             },

@@ -49,7 +49,7 @@ impl Deserialize for Option<Cursor> {
 impl AsyncSerialize for Cursor {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
-        W: AsyncWriteExt + Send + Unpin,
+        W: AsyncWriteExt + Send + Unpin + ?Sized,
     {
         CompactStr::from(self.topic_name)
             .write_into(writer, version)
@@ -73,7 +73,7 @@ impl AsyncSerialize for Cursor {
 impl AsyncSerialize for Option<Cursor> {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
-        W: AsyncWriteExt + Send + Unpin,
+        W: AsyncWriteExt + Send + Unpin + ?Sized,
     {
         match self {
             Some(cursor) => {

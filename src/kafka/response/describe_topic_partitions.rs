@@ -53,7 +53,7 @@ impl Serialize for DescribeTopicPartitions {
 impl AsyncSerialize for DescribeTopicPartitions {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
-        W: AsyncWriteExt + Send + Unpin,
+        W: AsyncWriteExt + Send + Unpin + ?Sized,
     {
         self.throttle_time_ms
             .write_into(writer, version)
@@ -152,7 +152,7 @@ impl Serialize for DescribeTopicPartitionsResponseTopic {
 impl AsyncSerialize for DescribeTopicPartitionsResponseTopic {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
-        W: AsyncWriteExt + Send + Unpin,
+        W: AsyncWriteExt + Send + Unpin + ?Sized,
     {
         writer
             .write_i16(self.error_code as i16)
@@ -262,7 +262,7 @@ impl Serialize for DescribeTopicPartitionsResponsePartition {
 impl AsyncSerialize for DescribeTopicPartitionsResponsePartition {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
-        W: tokio::io::AsyncWriteExt + Send + Unpin,
+        W: tokio::io::AsyncWriteExt + Send + Unpin + ?Sized,
     {
         writer
             .write_i16(self.error_code as i16)

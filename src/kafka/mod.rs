@@ -163,7 +163,7 @@ pub trait AsyncSerialize: Sized {
     #[allow(async_fn_in_trait)]
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
-        W: AsyncWriteExt + Send + Unpin;
+        W: AsyncWriteExt + Send + Unpin + ?Sized;
 }
 
 pub trait AsyncDeserialize: Sized {

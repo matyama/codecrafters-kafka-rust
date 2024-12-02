@@ -21,7 +21,7 @@ impl AsyncSerialize for bool {
     #[inline]
     async fn write_into<W>(self, writer: &mut W, _version: i16) -> Result<()>
     where
-        W: AsyncWriteExt + Send + Unpin,
+        W: AsyncWriteExt + Send + Unpin + ?Sized,
     {
         writer.write_u8(self as u8).await.context("bool")
     }
@@ -116,7 +116,7 @@ impl AsyncSerialize for i32 {
     #[inline]
     async fn write_into<W>(self, writer: &mut W, _version: i16) -> Result<()>
     where
-        W: AsyncWriteExt + Send + Unpin,
+        W: AsyncWriteExt + Send + Unpin + ?Sized,
     {
         writer.write_i32(self).await.context("i32")
     }
@@ -165,7 +165,7 @@ impl Serialize for VarInt {
 impl AsyncSerialize for VarInt {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
-        W: AsyncWriteExt + Send + Unpin,
+        W: AsyncWriteExt + Send + Unpin + ?Sized,
     {
         UnsignedVarInt::from(self).write_into(writer, version).await
     }
@@ -233,7 +233,7 @@ impl Serialize for UnsignedVarInt {
 impl AsyncSerialize for UnsignedVarInt {
     async fn write_into<W>(self, writer: &mut W, _version: i16) -> Result<()>
     where
-        W: AsyncWriteExt + Send + Unpin,
+        W: AsyncWriteExt + Send + Unpin + ?Sized,
     {
         // TODO: use local [0; MAX_SIZE] buf and write just once
 
@@ -306,7 +306,7 @@ impl Serialize for VarLong {
 impl AsyncSerialize for VarLong {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
-        W: AsyncWriteExt + Send + Unpin,
+        W: AsyncWriteExt + Send + Unpin + ?Sized,
     {
         UnsignedVarLong::from(self)
             .write_into(writer, version)
@@ -372,7 +372,7 @@ impl Serialize for UnsignedVarLong {
 impl AsyncSerialize for UnsignedVarLong {
     async fn write_into<W>(self, writer: &mut W, _version: i16) -> Result<()>
     where
-        W: AsyncWriteExt + Send + Unpin,
+        W: AsyncWriteExt + Send + Unpin + ?Sized,
     {
         // TODO: use local [0; MAX_SIZE] buf and write just once
 
@@ -448,7 +448,7 @@ impl Serialize for Option<Bytes> {
 impl AsyncSerialize for Bytes {
     async fn write_into<W>(self, writer: &mut W, _version: i16) -> Result<()>
     where
-        W: AsyncWriteExt + Send + Unpin,
+        W: AsyncWriteExt + Send + Unpin + ?Sized,
     {
         writer
             .write_i32(self.len() as i32)
@@ -462,7 +462,7 @@ impl AsyncSerialize for Bytes {
 impl AsyncSerialize for Option<Bytes> {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
-        W: AsyncWriteExt + Send + Unpin,
+        W: AsyncWriteExt + Send + Unpin + ?Sized,
     {
         if let Some(bytes) = self {
             bytes.write_into(writer, version).await
@@ -499,7 +499,7 @@ impl Serialize for Option<CompactBytes> {
 impl AsyncSerialize for CompactBytes {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
-        W: AsyncWriteExt + Send + Unpin,
+        W: AsyncWriteExt + Send + Unpin + ?Sized,
     {
         self.enc_len()
             .write_into(writer, version)
@@ -513,7 +513,7 @@ impl AsyncSerialize for CompactBytes {
 impl AsyncSerialize for Option<CompactBytes> {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
-        W: AsyncWriteExt + Send + Unpin,
+        W: AsyncWriteExt + Send + Unpin + ?Sized,
     {
         if let Some(b) = self {
             b.write_into(writer, version).await
@@ -577,7 +577,7 @@ impl Serialize for Uuid {
 impl AsyncSerialize for Uuid {
     async fn write_into<W>(self, writer: &mut W, _version: i16) -> Result<()>
     where
-        W: AsyncWriteExt + Send + Unpin,
+        W: AsyncWriteExt + Send + Unpin + ?Sized,
     {
         writer.write_all(&self.0).await.context("UUID bytes")
     }
@@ -757,7 +757,7 @@ impl Serialize for Option<Str> {
 impl AsyncSerialize for Str {
     async fn write_into<W>(self, writer: &mut W, _version: i16) -> Result<()>
     where
-        W: AsyncWriteExt + Send + Unpin,
+        W: AsyncWriteExt + Send + Unpin + ?Sized,
     {
         // Since STRING is non-empty, empty (default) values should be skipped
         //if self.0.is_empty() {
@@ -776,7 +776,7 @@ impl AsyncSerialize for Str {
 impl AsyncSerialize for Option<Str> {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
-        W: AsyncWriteExt + Send + Unpin,
+        W: AsyncWriteExt + Send + Unpin + ?Sized,
     {
         if let Some(s) = self {
             s.write_into(writer, version).await
@@ -904,7 +904,7 @@ impl Serialize for Option<CompactStr> {
 impl AsyncSerialize for CompactStr {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
-        W: AsyncWriteExt + Send + Unpin,
+        W: AsyncWriteExt + Send + Unpin + ?Sized,
     {
         self.enc_len()
             .write_into(writer, version)
@@ -921,7 +921,7 @@ impl AsyncSerialize for CompactStr {
 impl AsyncSerialize for Option<CompactStr> {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
-        W: AsyncWriteExt + Send + Unpin,
+        W: AsyncWriteExt + Send + Unpin + ?Sized,
     {
         if let Some(s) = self {
             s.write_into(writer, version).await
@@ -989,7 +989,7 @@ impl<T: Serialize> Serialize for &[T] {
 impl<T: AsyncSerialize> AsyncSerialize for Vec<T> {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
-        W: AsyncWriteExt + Send + Unpin,
+        W: AsyncWriteExt + Send + Unpin + ?Sized,
     {
         for (i, item) in self.into_iter().enumerate() {
             item.write_into(writer, version)
@@ -1065,7 +1065,7 @@ impl<T: Serialize> Serialize for Array<&Option<Vec<T>>> {
 impl<T: AsyncSerialize> AsyncSerialize for Array<Vec<T>> {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
-        W: AsyncWriteExt + Send + Unpin,
+        W: AsyncWriteExt + Send + Unpin + ?Sized,
     {
         writer
             .write_i32(self.len() as i32)
@@ -1080,7 +1080,7 @@ impl<T: AsyncSerialize> AsyncSerialize for Array<Vec<T>> {
 impl<T: AsyncSerialize> AsyncSerialize for Array<Option<Vec<T>>> {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
-        W: AsyncWriteExt + Send + Unpin,
+        W: AsyncWriteExt + Send + Unpin + ?Sized,
     {
         if let Some(array) = self.0 {
             Array(array).write_into(writer, version).await
@@ -1220,7 +1220,7 @@ impl<T: Serialize> Serialize for CompactArray<&Option<Vec<T>>> {
 impl<T: AsyncSerialize> AsyncSerialize for CompactArray<Vec<T>> {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
-        W: AsyncWriteExt + Send + Unpin,
+        W: AsyncWriteExt + Send + Unpin + ?Sized,
     {
         ensure!(
             self.len() < u32::MAX as usize,
@@ -1240,7 +1240,7 @@ impl<T: AsyncSerialize> AsyncSerialize for CompactArray<Vec<T>> {
 impl<T: AsyncSerialize> AsyncSerialize for CompactArray<Option<Vec<T>>> {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
-        W: AsyncWriteExt + Send + Unpin,
+        W: AsyncWriteExt + Send + Unpin + ?Sized,
     {
         if let Some(array) = self.0 {
             CompactArray(array).write_into(writer, version).await
@@ -1354,7 +1354,7 @@ impl Serialize for TagBuffer {
 impl AsyncSerialize for TagBuffer {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
-        W: AsyncWriteExt + Send + Unpin,
+        W: AsyncWriteExt + Send + Unpin + ?Sized,
     {
         UnsignedVarInt(self.0.len() as u32)
             .write_into(writer, version)

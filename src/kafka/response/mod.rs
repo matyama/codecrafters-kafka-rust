@@ -35,7 +35,7 @@ impl Serialize for ResponseHeader {
 impl AsyncSerialize for ResponseHeader {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
-        W: AsyncWriteExt + Send + Unpin,
+        W: AsyncWriteExt + Send + Unpin + ?Sized,
     {
         writer
             .write_i32(self.correlation_id)
@@ -63,7 +63,7 @@ pub struct ResponseMessage {
 impl AsyncSerialize for ResponseMessage {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
-        W: AsyncWriteExt + Send + Unpin,
+        W: AsyncWriteExt + Send + Unpin + ?Sized,
     {
         writer.write_i32(self.size).await.context("message size")?;
 
@@ -107,7 +107,7 @@ impl HeaderVersion for ResponseBody {
 impl AsyncSerialize for ResponseBody {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
-        W: AsyncWriteExt + Send + Unpin,
+        W: AsyncWriteExt + Send + Unpin + ?Sized,
     {
         match self {
             Self::ApiVersions(body) => body.write_into(writer, version).await,

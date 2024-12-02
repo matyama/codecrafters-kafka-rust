@@ -1,8 +1,11 @@
+use std::io::Cursor;
+
 use anyhow::{bail, ensure, Context as _, Result};
 use bytes::{Buf, Bytes};
+use tokio::io::AsyncReadExt;
 
 use crate::kafka::types::{Array, StrBytes, VarInt, VarLong};
-use crate::kafka::Deserialize;
+use crate::kafka::{AsyncDeserialize, AsyncSerialize, Deserialize, Serialize};
 
 pub(crate) use self::topic::{Topic, TopicRecord};
 
@@ -10,75 +13,164 @@ pub(crate) mod feature_level;
 pub(crate) mod partition;
 pub(crate) mod topic;
 
-pub fn decode<B: Buf + std::fmt::Debug>(buf: &mut B) -> Result<Vec<RecordBatch>> {
-    let mut batches = Vec::new();
+/// See official docs for [Record Batch](https://kafka.apache.org/documentation/#recordbatch).
+#[derive(Debug, PartialEq)]
+pub struct RecordBatchHeader {
+    pub base_offset: i64,
+    pub batch_length: i32,
+    pub partition_leader_epoch: i32,
+    /// format version (current magic value is 2)
+    pub magic: i8,
+    pub crc: u32,
 
-    while buf.has_remaining() {
-        let batch = decode_batch(buf).context("decode record batch")?;
-        batches.push(batch);
-    }
+    pub attributes: RecordBatchAttrs,
 
-    Ok(batches)
+    pub last_offset_delta: i32,
+    pub base_timestamp: i64,
+    pub max_timestamp: i64,
+    pub producer_id: i64,
+    pub producer_epoch: i16,
+    pub base_sequence: i32,
 }
 
-// TODO: async version
-pub fn decode_batch<B: Buf + std::fmt::Debug>(buf: &mut B) -> Result<RecordBatch> {
-    let (base_offset, _) = i64::deserialize(buf).context("base_offset")?;
-    let (batch_length, _) = i32::deserialize(buf).context("batch_length")?;
-    ensure!(batch_length > 0, "record batch length must be positive i32");
-
-    let (partition_leader_epoch, _) = i32::deserialize(buf).context("partition_leader_epoch")?;
-
-    let (version, _) = i8::deserialize(buf).context("magic")?;
-
-    match version {
-        // TODO: support reading record batch format v0 and v1
-        0..=1 => unimplemented!("legacy record batch format is unsupported"),
-        2 => {}
-        version => bail!("unknown record batch version: {version}"),
+impl RecordBatchHeader {
+    #[inline]
+    pub fn records_len(&self) -> usize {
+        (self.batch_length as usize).saturating_sub(Self::SIZE)
     }
 
-    let (crc, _) = u32::deserialize(buf).context("crc")?;
-    // TODO: validate CRC from the record batch against the batch buffer
-    //  - compute incrementally while reading the rest of the fields
+    #[allow(dead_code)]
+    #[inline]
+    pub fn contains(&self, offset: i64) -> bool {
+        (self.base_offset..=self.base_offset + self.last_offset_delta as i64).contains(&offset)
+    }
+}
 
-    let (attributes, _) = i16::deserialize(buf).context("attributes")?;
-    let attributes = RecordBatchAttrs::try_from(attributes).context("invalid batch attributes")?;
+impl Serialize for RecordBatchHeader {
+    const SIZE: usize = 8 + 4 + 4 + 1 + 4 + 2 + 4 + 8 + 8 + 8 + 2 + 4;
 
-    let (last_offset_delta, _) = i32::deserialize(buf).context("last_offset_delta")?;
+    #[inline]
+    fn encode_size(&self, _version: i16) -> usize {
+        Self::SIZE
+    }
+}
 
-    let (base_timestamp, _) = i64::deserialize(buf).context("base_timestamp")?;
-    let (max_timestamp, _) = i64::deserialize(buf).context("max_timestamp")?;
+impl Deserialize for RecordBatchHeader {
+    const DEFAULT_VERSION: i16 = 2;
 
-    let (producer_id, _) = i64::deserialize(buf).context("producer_id")?;
-    let (producer_epoch, _) = i16::deserialize(buf).context("producer_epoch")?;
+    fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
+        let mut size = 0;
 
-    let (base_sequence, _) = i32::deserialize(buf).context("base_sequence")?;
+        let (base_offset, n) = i64::deserialize(buf).context("base_offset")?;
+        size += n;
 
-    // TODO: decompress the rest of the buffer (based on `attributes.compression`)
-    debug_assert_eq!(
-        attributes.compression,
-        Compression::None,
-        "compression is not yet supported"
-    );
+        let (batch_length, n) = i32::deserialize(buf).context("batch_length")?;
+        size += n;
+        ensure!(batch_length > 0, "record batch length must be positive i32");
 
-    let (Array(records), _) = Deserialize::deserialize(buf).context("records")?;
+        let (partition_leader_epoch, n) =
+            i32::deserialize(buf).context("partition_leader_epoch")?;
+        size += n;
 
-    Ok(RecordBatch {
-        base_offset,
-        batch_length,
-        partition_leader_epoch,
-        magic: version,
-        crc,
-        attributes,
-        last_offset_delta,
-        base_timestamp,
-        max_timestamp,
-        producer_id,
-        producer_epoch,
-        base_sequence,
-        records,
-    })
+        let (magic, n) = i8::deserialize(buf).context("magic")?;
+        size += n;
+
+        ensure!(magic as i16 == version, "record batch: magic != version");
+
+        match magic {
+            // TODO: support reading record batch format v0 and v1
+            0..=1 => unimplemented!("legacy record batch format is unsupported"),
+            2 => {}
+            version => bail!("unknown record batch version: {version}"),
+        }
+
+        let (crc, n) = u32::deserialize(buf).context("crc")?;
+        size += n;
+
+        let (attributes, n) = i16::deserialize(buf).context("attributes")?;
+        size += n;
+
+        let attributes =
+            RecordBatchAttrs::try_from(attributes).context("invalid batch attributes")?;
+
+        let (last_offset_delta, n) = i32::deserialize(buf).context("last_offset_delta")?;
+        size += n;
+
+        let (base_timestamp, n) = i64::deserialize(buf).context("base_timestamp")?;
+        size += n;
+
+        let (max_timestamp, n) = i64::deserialize(buf).context("max_timestamp")?;
+        size += n;
+
+        let (producer_id, n) = i64::deserialize(buf).context("producer_id")?;
+        size += n;
+
+        let (producer_epoch, n) = i16::deserialize(buf).context("producer_epoch")?;
+        size += n;
+
+        let (base_sequence, n) = i32::deserialize(buf).context("base_sequence")?;
+        size += n;
+
+        // TODO: decompress the rest of the buffer (based on `attributes.compression`)
+        debug_assert_eq!(
+            attributes.compression,
+            Compression::None,
+            "compression is not yet supported"
+        );
+
+        let header = RecordBatchHeader {
+            base_offset,
+            batch_length,
+            partition_leader_epoch,
+            magic,
+            crc,
+            attributes,
+            last_offset_delta,
+            base_timestamp,
+            max_timestamp,
+            producer_id,
+            producer_epoch,
+            base_sequence,
+        };
+
+        Ok((header, size))
+    }
+}
+
+impl AsyncDeserialize for RecordBatchHeader {
+    /// This implementation is not cancellation safe.
+    async fn read_from<R>(reader: &mut R, version: i16) -> Result<(Self, usize)>
+    where
+        R: AsyncReadExt + Send + Unpin,
+    {
+        let mut buf = [0; Self::SIZE.next_power_of_two()];
+
+        let n = reader
+            .read_exact(&mut buf)
+            .await
+            .context("reading batch header")?;
+
+        let mut buf = Cursor::new(&mut buf[..n]);
+
+        Self::decode(&mut buf, version).context("record batch header")
+    }
+}
+
+impl Deserialize for Vec<RecordBatch> {
+    const DEFAULT_VERSION: i16 = <RecordBatch as Deserialize>::DEFAULT_VERSION;
+
+    fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
+        let mut batches = Vec::new();
+        let mut size = 0;
+
+        while buf.has_remaining() {
+            let (batch, n) = RecordBatch::decode(buf, version).context("decode record batch")?;
+            batches.push(batch);
+            size += n;
+        }
+
+        Ok((batches, size))
+    }
 }
 
 /// See official docs for [Record Batch](https://kafka.apache.org/documentation/#recordbatch).
@@ -101,6 +193,71 @@ pub struct RecordBatch {
     pub base_sequence: i32,
 
     pub records: Vec<Record>,
+}
+
+impl RecordBatch {
+    #[inline]
+    pub fn new(header: RecordBatchHeader, records: Vec<Record>) -> Self {
+        Self {
+            base_offset: header.base_offset,
+            batch_length: header.batch_length,
+            partition_leader_epoch: header.partition_leader_epoch,
+            magic: header.magic,
+            crc: header.crc,
+            attributes: header.attributes,
+            last_offset_delta: header.last_offset_delta,
+            base_timestamp: header.base_timestamp,
+            max_timestamp: header.max_timestamp,
+            producer_id: header.producer_id,
+            producer_epoch: header.producer_epoch,
+            base_sequence: header.base_sequence,
+            records,
+        }
+    }
+}
+
+impl Deserialize for RecordBatch {
+    const DEFAULT_VERSION: i16 = <RecordBatchHeader as Deserialize>::DEFAULT_VERSION;
+
+    fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
+        let (header, header_size) =
+            RecordBatchHeader::decode(buf, version).context("record batch header")?;
+
+        let (Array(records), records_size) =
+            Deserialize::decode(buf, version).context("record batch records")?;
+
+        Ok((Self::new(header, records), header_size + records_size))
+    }
+}
+
+impl AsyncDeserialize for RecordBatch {
+    /// This implementation is not cancellation safe.
+    async fn read_from<R>(reader: &mut R, version: i16) -> Result<(Self, usize)>
+    where
+        R: AsyncReadExt + Send + Unpin,
+    {
+        let (header, header_size) = RecordBatchHeader::read_from(reader, version)
+            .await
+            .context("record batch header")?;
+
+        // TODO: impl AsyncDeserialize for BatchRecords
+        let mut buf = vec![0; header.records_len()];
+
+        reader
+            .read_exact(&mut buf)
+            .await
+            .context("reading batch records")?;
+
+        let mut buf = Cursor::new(buf);
+
+        let (Array(records), records_size) =
+            Deserialize::deserialize(&mut buf).context("record batch records")?;
+
+        let size = header.batch_length as usize;
+        debug_assert_eq!(size, header_size + records_size);
+
+        Ok((Self::new(header, records), size))
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -142,6 +299,7 @@ impl TryFrom<i16> for RecordBatchAttrs {
 /// See official docs for [Record](https://kafka.apache.org/documentation/#record).
 #[derive(Debug, PartialEq)]
 pub struct Record {
+    /// The length of the record calculated from the attributes field to the end of the record.
     pub length: usize,
     /// bit 0~7: unused
     pub attributes: RecordAttrs,
@@ -200,6 +358,38 @@ impl Deserialize for Record {
         };
 
         Ok((record, byte_size))
+    }
+}
+
+impl AsyncDeserialize for Record {
+    async fn read_from<R>(reader: &mut R, version: i16) -> Result<(Self, usize)>
+    where
+        R: AsyncReadExt + Send + Unpin,
+    {
+        let (length, n) = VarInt::read_from(reader, version)
+            .await
+            .context("record length")?;
+
+        let length = usize::try_from(length).context("record length")?;
+
+        let mut buf = vec![0; n + length];
+
+        // write the length to the buffer for the final decode to work
+        // TODO: need to async serialize for this
+        let mut length_buf = Cursor::new(&mut buf[..n]);
+        VarInt(length as i32)
+            .write_into(&mut length_buf, version)
+            .await?;
+
+        let n = reader
+            .read_exact(&mut buf[n..])
+            .await
+            .context("record contents")?;
+
+        debug_assert_eq!(n, length);
+
+        let mut buf = Cursor::new(buf);
+        Self::decode(&mut buf, version).context("decode record")
     }
 }
 
@@ -329,6 +519,54 @@ impl From<i16> for TimestampType {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn read_record() {
+        let mut buf = Vec::new();
+
+        buf.extend_from_slice(b"\x3a"); // length
+        buf.extend_from_slice(b"\x00"); // attributes
+        buf.extend_from_slice(b"\x00"); // timestamp_delta
+        buf.extend_from_slice(b"\x00"); // offset_delta
+        buf.extend_from_slice(b"\x01"); // key length
+        buf.extend_from_slice(b"\x2e"); // value length
+
+        let value = {
+            let mut val = Vec::with_capacity(23);
+            val.extend_from_slice(b"\x01"); // frame version
+            val.extend_from_slice(b"\x0c"); // type
+            val.extend_from_slice(b"\x00"); // version
+            val.extend_from_slice(b"\x11"); // name length & contents
+            val.extend_from_slice(
+                b"\x6d\x65\x74\x61\x64\x61\x74\x61\x2e\x76\x65\x72\x73\x69\x6f\x6e",
+            );
+            val.extend_from_slice(b"\x00\x14"); // feature_level
+            val.extend_from_slice(b"\x00"); // tagged_fields
+            Bytes::from(val)
+        };
+
+        buf.extend_from_slice(&value); // value contents
+        buf.extend_from_slice(b"\x00"); // headers array count
+
+        let expected_len = buf.len();
+
+        let expected = Record {
+            length: 29,
+            attributes: RecordAttrs(0),
+            timestamp_delta: 0,
+            offset_delta: 0,
+            key: None,
+            value: Some(value),
+            headers: vec![],
+        };
+
+        let mut buf = Cursor::new(buf);
+
+        let (actual, actual_len) = Record::read(&mut buf).await.expect("valid record");
+
+        assert_eq!(expected_len, actual_len);
+        assert_eq!(expected, actual);
+    }
 
     #[test]
     fn decode_record_batch() {
@@ -592,10 +830,11 @@ mod tests {
             ],
         };
 
-        let mut buf = std::io::Cursor::new(buf);
+        let mut buf = Cursor::new(buf);
 
         let expected = vec![batch1, batch2];
-        let actual = decode(&mut buf).expect("decode request batches");
+        let (actual, _) =
+            <Vec<RecordBatch>>::deserialize(&mut buf).expect("decode request batches");
         assert_eq!(expected, actual);
     }
 }

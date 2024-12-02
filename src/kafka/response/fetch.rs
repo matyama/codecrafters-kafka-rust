@@ -138,7 +138,7 @@ impl Serialize for Fetch {
 impl AsyncSerialize for Fetch {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
-        W: AsyncWriteExt + Send + Unpin,
+        W: AsyncWriteExt + Send + Unpin + ?Sized,
     {
         if version >= 1 {
             writer
@@ -237,7 +237,7 @@ impl Serialize for FetchableTopicResponse {
 impl AsyncSerialize for FetchableTopicResponse {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
-        W: AsyncWriteExt + Send + Unpin,
+        W: AsyncWriteExt + Send + Unpin + ?Sized,
     {
         match version {
             0..=11 => Str::from(self.topic)
@@ -407,7 +407,7 @@ impl Serialize for PartitionData {
 impl AsyncSerialize for PartitionData {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
-        W: AsyncWriteExt + Send + Unpin,
+        W: AsyncWriteExt + Send + Unpin + ?Sized,
     {
         writer
             .write_i32(self.partition_index)
@@ -520,7 +520,7 @@ impl Serialize for EpochEndOffset {
 impl AsyncSerialize for EpochEndOffset {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
-        W: AsyncWriteExt + Send + Unpin,
+        W: AsyncWriteExt + Send + Unpin + ?Sized,
     {
         if version >= 12 {
             writer.write_i32(self.epoch).await.context("epoch")?;
@@ -585,7 +585,7 @@ impl Serialize for LeaderIdAndEpoch {
 impl AsyncSerialize for LeaderIdAndEpoch {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
-        W: AsyncWriteExt + Send + Unpin,
+        W: AsyncWriteExt + Send + Unpin + ?Sized,
     {
         if version >= 12 {
             writer
@@ -654,7 +654,7 @@ impl Serialize for SnapshotId {
 impl AsyncSerialize for SnapshotId {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
-        W: AsyncWriteExt + Send + Unpin,
+        W: AsyncWriteExt + Send + Unpin + ?Sized,
     {
         writer
             .write_i64(self.end_offset)
@@ -704,7 +704,7 @@ impl Serialize for AbortedTransaction {
 impl AsyncSerialize for AbortedTransaction {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
-        W: AsyncWriteExt + Send + Unpin,
+        W: AsyncWriteExt + Send + Unpin + ?Sized,
     {
         if version >= 4 {
             writer

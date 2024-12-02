@@ -125,7 +125,7 @@ impl Serialize for ApiVersions {
 impl AsyncSerialize for ApiVersions {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
-        W: AsyncWriteExt + Send + Unpin,
+        W: AsyncWriteExt + Send + Unpin + ?Sized,
     {
         writer
             .write_i16(self.error_code as i16)
@@ -202,7 +202,7 @@ impl Serialize for ApiVersion {
 impl AsyncSerialize for ApiVersion {
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
-        W: AsyncWriteExt + Send + Unpin,
+        W: AsyncWriteExt + Send + Unpin + ?Sized,
     {
         writer.write_i16(self.api_key as i16).await?;
         writer.write_i16(self.min_version).await?;
