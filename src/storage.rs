@@ -121,6 +121,19 @@ impl Storage {
         Ok(Self { inner })
     }
 
+    /// Given a `topic` name, returns corresponding topic ID and a list of partitions in it.
+    ///
+    /// ### Additional parameters
+    ///  - `min_partition` is the first partition to return
+    ///  - `partition_limit` is the maximum number of partitions to return
+    ///
+    /// ### Output
+    /// In addition to the topic ID and partitions, this returns an optional cursor information if
+    /// the partition limit is exceeded.
+    ///
+    /// Exceeding the quota is indicated by a [`ControlFlow::Break`] with
+    ///  - `Some((topic_name, next_partition))` if there are some partitions left in this topic
+    ///  - `None` if the limit has been reached at the very last partition in this topic
     pub async fn describe_topic(
         &self,
         topic: &StrBytes,
@@ -153,6 +166,13 @@ impl Storage {
     }
 
     // XXX: add version?
+    /// Fetch a record segment containing given `offset` for the `topic` and `partition`.
+    ///
+    /// Note that this returns a raw log segment (file contents). This means that
+    ///  1. There can (and most likely will) be multiple records returned, all inside a record
+    ///     batch that includes given `offset`.
+    ///  2. Record batches can in general contain offsets _smaller_ than the `offset` and it's up
+    ///     to the consumer to filter these out.
     pub async fn fetch_records(
         &self,
         topic: Uuid,
