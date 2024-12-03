@@ -19,12 +19,9 @@ pub struct RecordBatchHeader {
     pub base_offset: i64,
     pub batch_length: i32,
     pub partition_leader_epoch: i32,
-    /// format version (current magic value is 2)
     pub magic: i8,
     pub crc: u32,
-
     pub attributes: RecordBatchAttrs,
-
     pub last_offset_delta: i32,
     pub base_timestamp: i64,
     pub max_timestamp: i64,
@@ -168,7 +165,7 @@ impl AsyncDeserialize for RecordBatchHeader {
     where
         R: AsyncReadExt + Send + Unpin,
     {
-        let mut buf = [0; Self::SIZE.next_power_of_two()];
+        let mut buf = [0; Self::SIZE];
 
         let n = reader
             .read_exact(&mut buf)
@@ -207,9 +204,7 @@ pub struct RecordBatch {
     /// format version (current magic value is 2)
     pub magic: i8,
     pub crc: u32,
-
     pub attributes: RecordBatchAttrs,
-
     pub last_offset_delta: i32,
     pub base_timestamp: i64,
     pub max_timestamp: i64,

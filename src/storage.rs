@@ -18,23 +18,27 @@ use crate::logs::LogDir;
 #[derive(Debug)]
 struct LogFile {
     /// min offset of the log file (also contained in the file name)
-    offset: i64,
+    base_offset: i64,
+    #[allow(dead_code)]
+    /// file location
+    path: PathBuf,
     /// open log file
     file: Mutex<File>,
 }
 
 impl LogFile {
     #[inline]
-    fn new(offset: i64, file: File) -> Self {
+    fn new(base_offset: i64, path: PathBuf, file: File) -> Self {
         Self {
-            offset,
+            base_offset,
+            path,
             file: Mutex::new(file),
         }
     }
 
     #[inline]
-    fn offset(&self) -> i64 {
-        self.offset
+    fn base_offset(&self) -> i64 {
+        self.base_offset
     }
 
     #[inline]
@@ -42,6 +46,64 @@ impl LogFile {
         self.file.lock().await
     }
 }
+
+//#[derive(Debug)]
+//struct IndexEntry {
+//    /// offset relative to the base offset
+//    relative_offset: i64,
+//    /// byte offset within the log file
+//    physical_position: i32,
+//}
+//
+// TODO: Kafka uses a .index file instead
+//  - most likely does not manage this in memory
+//  - it still may do a binary search seeks on the .index file, given that all entries have
+//    uniform size
+//  - https://stackoverflow.com/a/30233048
+//  - https://github.com/apache/kafka/blob/trunk/storage/src/main/java/org/apache/kafka/storage/internals/log/OffsetIndex.java
+//  - apparently Kafka mmaps the index file to do the search
+//  - https://docs.rs/memmap2/latest/memmap2
+///// Append-only index of record offset-to-position for a corresponding log file
+//#[derive(Debug)]
+//struct LogIndex {
+//    base_offset: i64,
+//    // path: PathBuf,
+//    /// Index entries with monotonically increasing relative offsets
+//    entries: Vec<IndexEntry>,
+//}
+//
+//impl LogIndex {
+//    fn lookup(&self, offset: i64) -> Result<&IndexEntry, Option<&IndexEntry>> {
+//        match self.entries.binary_search_by_key(&offset, |entry| {
+//            self.base_offset + entry.relative_offset as i64
+//        }) {
+//            // SAFETY: index returned by a binary search hit, so must be within bounds
+//            Ok(i) => Ok(unsafe { self.entries.get_unchecked(i) }),
+//            Err(i) => Err(self.entries.get(i)),
+//        }
+//    }
+//
+//    fn append(&mut self, offset: i64, position: i32) -> Result<()> {
+//        use anyhow::ensure;
+//
+//        ensure!(offset > self.base_offset, "offset <= base offset");
+//        let relative_offset = offset - self.base_offset;
+//
+//        if let Some(last) = self.entries.last() {
+//            ensure!(
+//                relative_offset > last.relative_offset,
+//                "offset <= last offset"
+//            );
+//        }
+//
+//        self.entries.push(IndexEntry {
+//            relative_offset,
+//            physical_position: position,
+//        });
+//
+//        Ok(())
+//    }
+//}
 
 #[derive(Debug)]
 struct PartitionIndex {
@@ -66,7 +128,9 @@ impl PartitionIndex {
 
     #[inline]
     fn lookup_file(&self, offset: i64) -> Option<&LogFile> {
-        let (Ok(ix) | Err(ix)) = self.logs.binary_search_by_key(&offset, LogFile::offset);
+        let (Ok(ix) | Err(ix)) = self
+            .logs
+            .binary_search_by_key(&offset, LogFile::base_offset);
         self.logs.get(ix)
     }
 }
@@ -169,7 +233,7 @@ impl Storage {
     // TODO: Kafka does not fetch records into memory
     //  - https://www.confluent.io/blog/kafka-producer-and-consumer-internals-4-consumer-fetch-requests
     //  - use sendfile(2) to zero-copy data (fd -> socket) https://linux.die.net/man/2/sendfile
-    //  - https://github.com/rust-lang/rust/issues/60689#issuecomment-491255226
+    //  - https://docs.rs/sendfile/latest/sendfile
     //  - or at least something like seek + `tokio::io::{copy, copy_buf}`
     //  - this will require changing the fetch response / response writer
     /// Fetch a record batch containing given `offset` for the `topic` and `partition`.
@@ -209,6 +273,7 @@ impl Storage {
 
         // TODO: Kafka uses a separate index file alongside each log (i.e., per segment) for this
         //  - The index contains the file offset of each record (batch)
+        //    (see https://stackoverflow.com/a/30233048)
         //  - So this file offset lookup can be made just based on the index without ever touching
         //    the data (log file)
         //  - Once the file offset is calculated, the response writer can perform single `sendfile`
@@ -226,31 +291,18 @@ impl Storage {
             if header.contains(offset) {
                 // hit: read the rest of the log file, starting with this batch
 
-                log.seek(SeekFrom::Start(batch_start))
-                    .await
-                    .context("seek to batch start")?;
-
                 let batch_len = header.batch_length as usize;
                 let mut buf = Vec::with_capacity(batch_len);
 
-                //println!("header CRC={} ({:02x?})", header.crc, header.crc);
-                //println!("{header:?}");
+                // serialize the header into the buffer (so we don't have to issue a seek)
+                let Ok(_) = header.encode(&mut buf) else {
+                    unreachable!("buffer has sufficient capacity for the whole batch");
+                };
 
-                //// serialize the header into the buffer (so we don't have to issue a seek)
-                //let Ok(_) = header.encode(&mut buf) else {
-                //    unreachable!("buffer has sufficient capacity for the whole batch");
-                //};
-
-                //println!("batch buf (header): {buf:x?}");
-
-                let _ = log.read_to_end(&mut buf).await.with_context(|| {
-                    format!(
-                        "failed to fetch records for ({}, {partition}, {offset})",
-                        topic.as_hex()
-                    )
-                });
-
-                //println!("batch buf: {buf:x?}");
+                let _ = log
+                    .read_to_end(&mut buf)
+                    .await
+                    .context("failed to read batch records");
 
                 buf.shrink_to_fit();
                 break Bytes::from(buf);
@@ -362,11 +414,11 @@ async fn index_partition(index: &mut PartitionIndex) -> Result<()> {
             let log_file = fs::File::options()
                 .read(true)
                 .write(true)
-                .open(path)
+                .open(&path)
                 .await
                 .context("failed to open log file")?;
 
-            index.logs.push(LogFile::new(base_offset, log_file));
+            index.logs.push(LogFile::new(base_offset, path, log_file));
 
             needs_sorting &= prev_offset < base_offset;
             prev_offset = base_offset;
@@ -374,7 +426,7 @@ async fn index_partition(index: &mut PartitionIndex) -> Result<()> {
     }
 
     if needs_sorting {
-        index.logs.sort_unstable_by_key(LogFile::offset);
+        index.logs.sort_unstable_by_key(LogFile::base_offset);
     }
 
     Ok(())
