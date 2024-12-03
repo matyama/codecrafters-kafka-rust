@@ -135,10 +135,7 @@ async fn fetch_topic(
 }
 
 async fn fetch_partition(topic: Uuid, fp: FetchPartition, storage: Arc<Storage>) -> PartitionData {
-    println!(
-        "Fetching ({topic}, {}): {:?}",
-        fp.partition, fp.fetch_offset
-    );
+    println!("Fetching ({topic}, {}): {}", fp.partition, fp.fetch_offset);
 
     let records = storage
         .fetch_records(topic, fp.partition, fp.fetch_offset)
@@ -151,9 +148,29 @@ async fn fetch_partition(topic: Uuid, fp: FetchPartition, storage: Arc<Storage>)
             // TODO: fill in actual partition data
             PartitionData::new(fp.partition, ErrorCode::NONE, 0).with_records(records)
         }
-        Ok(UnknownTopic) => PartitionData::new(fp.partition, ErrorCode::UNKNOWN_TOPIC_ID, 0),
-        Ok(OffsetOutOfRange) => PartitionData::new(fp.partition, ErrorCode::OFFSET_OUT_OF_RANGE, 0),
-        Err(_) => PartitionData::new(fp.partition, ErrorCode::KAFKA_STORAGE_ERROR, 0),
+        Ok(UnknownTopic) => {
+            let error = ErrorCode::UNKNOWN_TOPIC_ID;
+            eprintln!(
+                "Fetch ({}, {}) failed: {error:?}",
+                fp.partition, fp.fetch_offset
+            );
+            PartitionData::new(fp.partition, error, 0)
+        }
+        Ok(OffsetOutOfRange) => {
+            let error = ErrorCode::OFFSET_OUT_OF_RANGE;
+            eprintln!(
+                "Fetch ({}, {}) failed: {error:?}",
+                fp.partition, fp.fetch_offset
+            );
+            PartitionData::new(fp.partition, error, 0)
+        }
+        Err(error) => {
+            eprintln!(
+                "Fetch ({}, {}) failed: {error:?}",
+                fp.partition, fp.fetch_offset
+            );
+            PartitionData::new(fp.partition, ErrorCode::KAFKA_STORAGE_ERROR, 0)
+        }
     }
 }
 

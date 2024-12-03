@@ -1,17 +1,18 @@
 use std::collections::{BTreeMap, HashMap};
+use std::io::SeekFrom;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context as _, Result};
 use bytes::Bytes;
 use tokio::fs::{self, File};
-use tokio::io::AsyncReadExt as _;
+use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
 use tokio::sync::{Mutex, MutexGuard, RwLock};
 use tokio::task::JoinSet;
 
-use crate::kafka::record::{RecordBatch, Topic, TopicRecord};
+use crate::kafka::record::{RecordBatch, RecordBatchHeader, Topic, TopicRecord};
 use crate::kafka::types::{StrBytes, Uuid};
-use crate::kafka::Deserialize;
+use crate::kafka::{AsyncDeserialize, Deserialize};
 use crate::logs::LogDir;
 
 #[derive(Debug)]
@@ -165,7 +166,12 @@ impl Storage {
         Some((topic.topic_id(), partitions, next))
     }
 
-    // XXX: add version?
+    // TODO: Kafka does not fetch records into memory
+    //  - https://www.confluent.io/blog/kafka-producer-and-consumer-internals-4-consumer-fetch-requests
+    //  - use sendfile(2) to zero-copy data (fd -> socket) https://linux.die.net/man/2/sendfile
+    //  - https://github.com/rust-lang/rust/issues/60689#issuecomment-491255226
+    //  - or at least something like seek + `tokio::io::{copy, copy_buf}`
+    //  - this will require changing the fetch response / response writer
     /// Fetch a record batch containing given `offset` for the `topic` and `partition`.
     ///
     /// Note that this returns batch of raw records (file contents). This means that
@@ -196,24 +202,93 @@ impl Storage {
         // XXX: this locking is rather unfortunate
         //  - maybe store just the path and open the file ad-hoc
         let mut log_file = log_file.lock().await;
+        let log = &mut *log_file;
 
-        // TODO: read batch header first to know and reserve buffer capacity
-        let mut buf = Vec::new();
+        // start at the beginning of the log file
+        let mut batch_start = log.rewind().await.context("seek to start of the log")?;
 
-        let _ = log_file.read_to_end(&mut buf).await.with_context(|| {
-            format!(
-                "failed to fetch records for ({}, {partition}, {offset})",
-                topic.as_hex()
-            )
-        });
+        // TODO: Kafka uses a separate index file alongside each log (i.e., per segment) for this
+        //  - The index contains the file offset of each record (batch)
+        //  - So this file offset lookup can be made just based on the index without ever touching
+        //    the data (log file)
+        //  - Once the file offset is calculated, the response writer can perform single `sendfile`
+        //    syscall to write the records to the socket without actually copying them to userspace
+        //  - So this really should be part of an increment indexing (segments are immutable,
+        //    modulo the active one, which is append-only, and discarding due to retention)
+        let batch = loop {
+            let Some(header) = try_read_header(log, batch_start)
+                .await
+                .context("failed to read batch header")?
+            else {
+                break Bytes::new();
+            };
 
-        buf.shrink_to_fit();
+            if header.contains(offset) {
+                // hit: read the rest of the log file, starting with this batch
 
-        Ok(FetchResult::Records(if buf.is_empty() {
+                log.seek(SeekFrom::Start(batch_start))
+                    .await
+                    .context("seek to batch start")?;
+
+                let batch_len = header.batch_length as usize;
+                let mut buf = Vec::with_capacity(batch_len);
+
+                //println!("header CRC={} ({:02x?})", header.crc, header.crc);
+                //println!("{header:?}");
+
+                //// serialize the header into the buffer (so we don't have to issue a seek)
+                //let Ok(_) = header.encode(&mut buf) else {
+                //    unreachable!("buffer has sufficient capacity for the whole batch");
+                //};
+
+                //println!("batch buf (header): {buf:x?}");
+
+                let _ = log.read_to_end(&mut buf).await.with_context(|| {
+                    format!(
+                        "failed to fetch records for ({}, {partition}, {offset})",
+                        topic.as_hex()
+                    )
+                });
+
+                //println!("batch buf: {buf:x?}");
+
+                buf.shrink_to_fit();
+                break Bytes::from(buf);
+            }
+
+            // otherwise seek/skip over the contents of the current batch
+            batch_start = log
+                .seek(SeekFrom::Current(header.records_len() as i64))
+                .await
+                .context("seek next batch")?;
+        };
+
+        Ok(FetchResult::Records(if batch.is_empty() {
             None
         } else {
-            Some(Bytes::from(buf))
+            Some(batch)
         }))
+    }
+}
+
+async fn try_read_header(log: &mut File, batch_start: u64) -> Result<Option<RecordBatchHeader>> {
+    use std::io::{Error, ErrorKind};
+    match RecordBatchHeader::read(log).await {
+        Ok((header, _)) => Ok(Some(header)),
+        Err(e) if batch_start == 0 => match e.downcast::<Error>() {
+            Ok(e) if matches!(e.kind(), ErrorKind::UnexpectedEof) => {
+                // check whether the log file is actually empty
+                let meta = log.metadata().await.context("log file metadata")?;
+                if meta.len() > 0 {
+                    Err(e).context("unexpected EOF on non-empty log file")
+                } else {
+                    Ok(None)
+                }
+            }
+            Ok(e) => Err(e).context("I/O error other than unexpected EOF"),
+            Err(e) => Err(e).context("not an I/O error"),
+        },
+        Err(e) => Err(e).context("non-empty log file: not a first batch in the log"),
     }
 }
 

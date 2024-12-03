@@ -1,7 +1,7 @@
 use std::io::Cursor;
 
 use anyhow::{bail, ensure, Context as _, Result};
-use bytes::{Buf, Bytes};
+use bytes::{Buf, BufMut, Bytes};
 use tokio::io::AsyncReadExt;
 
 use crate::kafka::types::{Array, StrBytes, VarInt, VarLong};
@@ -39,10 +39,33 @@ impl RecordBatchHeader {
         (self.batch_length as usize).saturating_sub(Self::SIZE)
     }
 
-    #[allow(dead_code)]
     #[inline]
     pub fn contains(&self, offset: i64) -> bool {
         (self.base_offset..=self.base_offset + self.last_offset_delta as i64).contains(&offset)
+    }
+
+    // TODO: move this to the Serialize trait (requires updating all existing impls)
+    #[allow(dead_code)]
+    pub(crate) fn encode<B: BufMut>(self, buf: &mut B) -> Result<()> {
+        ensure!(
+            buf.remaining_mut() >= Self::SIZE,
+            "insufficient buffer capacity"
+        );
+
+        buf.put_i64(self.base_offset);
+        buf.put_i32(self.batch_length);
+        buf.put_i32(self.partition_leader_epoch);
+        buf.put_i8(self.magic);
+        buf.put_u32(self.crc);
+        buf.put_i16(self.attributes.into());
+        buf.put_i32(self.last_offset_delta);
+        buf.put_i64(self.base_timestamp);
+        buf.put_i64(self.max_timestamp);
+        buf.put_i64(self.producer_id);
+        buf.put_i16(self.producer_epoch);
+        buf.put_i32(self.base_sequence);
+
+        Ok(())
     }
 }
 
@@ -138,6 +161,8 @@ impl Deserialize for RecordBatchHeader {
 }
 
 impl AsyncDeserialize for RecordBatchHeader {
+    const DEFAULT_VERSION: i16 = 2;
+
     /// This implementation is not cancellation safe.
     async fn read_from<R>(reader: &mut R, version: i16) -> Result<(Self, usize)>
     where
@@ -231,6 +256,8 @@ impl Deserialize for RecordBatch {
 }
 
 impl AsyncDeserialize for RecordBatch {
+    const DEFAULT_VERSION: i16 = <RecordBatchHeader as AsyncDeserialize>::DEFAULT_VERSION;
+
     /// This implementation is not cancellation safe.
     async fn read_from<R>(reader: &mut R, version: i16) -> Result<(Self, usize)>
     where
@@ -260,7 +287,7 @@ impl AsyncDeserialize for RecordBatch {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RecordBatchAttrs {
     /// bit 0~2
     pub compression: Compression,
@@ -293,6 +320,28 @@ impl TryFrom<i16> for RecordBatchAttrs {
             is_control: (attributes & (1 << 5)) != 0,
             has_delete_horizon_ms: (attributes & (1 << 6)) != 0,
         })
+    }
+}
+
+impl From<RecordBatchAttrs> for i16 {
+    fn from(attrs: RecordBatchAttrs) -> Self {
+        let mut attributes = attrs.compression as i16;
+
+        attributes |= (attrs.timestamp_type as i16) << 3;
+
+        if attrs.is_transactional {
+            attributes |= 1 << 4;
+        }
+
+        if attrs.is_control {
+            attributes |= 1 << 5;
+        }
+
+        if attrs.has_delete_horizon_ms {
+            attributes |= 1 << 6;
+        }
+
+        attributes
     }
 }
 
@@ -362,6 +411,8 @@ impl Deserialize for Record {
 }
 
 impl AsyncDeserialize for Record {
+    const DEFAULT_VERSION: i16 = <RecordBatch as AsyncDeserialize>::DEFAULT_VERSION;
+
     async fn read_from<R>(reader: &mut R, version: i16) -> Result<(Self, usize)>
     where
         R: AsyncReadExt + Send + Unpin,
@@ -474,7 +525,7 @@ impl Deserialize for Header {
     }
 }
 
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Compression {
     #[default]
     None = 0,
@@ -499,7 +550,7 @@ impl TryFrom<i16> for Compression {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum TimestampType {
     Create = 0,
     LogAppend = 1,
@@ -519,6 +570,33 @@ impl From<i16> for TimestampType {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn batch_attributes() {
+        let attrs = RecordBatchAttrs {
+            compression: Compression::Lz4,
+            timestamp_type: TimestampType::LogAppend,
+            is_transactional: true,
+            is_control: false,
+            has_delete_horizon_ms: false,
+        };
+
+        let encoded = i16::from(attrs.clone());
+        let decoded = RecordBatchAttrs::try_from(encoded).expect("valid attributes");
+        assert_eq!(decoded, attrs);
+
+        let attrs = RecordBatchAttrs {
+            compression: Compression::None,
+            timestamp_type: TimestampType::Create,
+            is_transactional: false,
+            is_control: false,
+            has_delete_horizon_ms: false,
+        };
+
+        let encoded = i16::from(attrs.clone());
+        let decoded = RecordBatchAttrs::try_from(encoded).expect("valid attributes");
+        assert_eq!(decoded, attrs);
+    }
 
     #[tokio::test]
     async fn read_record() {

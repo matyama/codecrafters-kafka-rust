@@ -6,6 +6,7 @@ use anyhow::{Context as _, Result};
 use tokio::net::TcpListener;
 use tokio::signal;
 use tokio::task;
+use tokio::time::{sleep, Duration};
 
 use redis_starter_rust::Server;
 
@@ -15,6 +16,9 @@ async fn main() -> Result<()> {
         .find(|arg| arg.contains("server.properties"))
         .map(PathBuf::from)
         .context("missing required server.properties argument")?;
+
+    // NOTE: prevent flaky codecrafters test runs when test log dirs are not fully written
+    sleep(Duration::from_millis(200)).await;
 
     let server = Server::new(server_properties)
         .await
