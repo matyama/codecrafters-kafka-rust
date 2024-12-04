@@ -4,9 +4,10 @@ use tokio::io::AsyncWriteExt;
 
 use crate::kafka::error::ErrorCode;
 use crate::kafka::types::{
-    Array, CompactArray, CompactBytes, CompactStr, Str, StrBytes, TagBuffer, Uuid,
+    Array, Compact, CompactArray, CompactStr, Str, StrBytes, TagBuffer, Uuid,
 };
 use crate::kafka::{AsyncSerialize, Serialize};
+use crate::storage::{LogRef, Store};
 
 /// # Fetch Response
 ///
@@ -331,7 +332,7 @@ pub struct PartitionData {
     /// ### Encoding
     ///  - v0-11: [`Bytes`]
     ///  - v12+: [`CompactBytes`]
-    pub records: Option<Bytes>,
+    pub records: Store<Option<Bytes>, Option<LogRef>>,
 
     /// The tagged fields. (API v12+)
     pub tagged_fields: TagBuffer,
@@ -350,13 +351,13 @@ impl PartitionData {
             //snapshot_id: Default::default(),
             aborted_transactions: Default::default(),
             preferred_read_replica: -1,
-            records: None,
+            records: Store::Memory(None),
             tagged_fields: TagBuffer::default(),
         }
     }
 
     #[inline]
-    pub fn with_records(mut self, records: Option<Bytes>) -> Self {
+    pub fn with_records(mut self, records: Store<Option<Bytes>, Option<LogRef>>) -> Self {
         self.records = records;
         self
     }
@@ -389,10 +390,17 @@ impl Serialize for PartitionData {
         }
 
         size += if version >= 12 {
-            // NOTE: does not clone the raw bytes, just increments the ref count
-            self.records.clone().map(CompactBytes).encode_size(version)
+            match &self.records {
+                // NOTE: does not clone the raw bytes, just increments the ref count
+                Store::Memory(records) => records.clone().map(Compact).encode_size(version),
+                Store::FileSystem(entry) => entry.clone().map(Compact).encode_size(version),
+            }
         } else {
-            self.records.encode_size(version)
+            match &self.records {
+                // NOTE: does not clone the raw bytes, just increments the ref count
+                Store::Memory(records) => records.encode_size(version),
+                Store::FileSystem(entry) => entry.encode_size(version),
+            }
         };
 
         if version >= 12 {
@@ -458,11 +466,19 @@ impl AsyncSerialize for PartitionData {
         }
 
         if version >= 12 {
-            self.records
-                .map(CompactBytes)
-                .write_into(writer, version)
-                .await
-                .context("records")?;
+            match self.records {
+                Store::Memory(records) => records
+                    .map(Compact)
+                    .write_into(writer, version)
+                    .await
+                    .context("records")?,
+
+                Store::FileSystem(log_file) => log_file
+                    .map(Compact)
+                    .write_into(writer, version)
+                    .await
+                    .context("records")?,
+            }
         } else {
             self.records
                 .write_into(writer, version)

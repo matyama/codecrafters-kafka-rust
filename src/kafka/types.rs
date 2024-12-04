@@ -472,6 +472,7 @@ impl AsyncSerialize for Option<Bytes> {
     }
 }
 
+// TODO: deprecate in favor of more general Compact<S>
 #[derive(Clone, Debug)]
 #[repr(transparent)]
 pub struct CompactBytes(pub Bytes);
@@ -511,6 +512,80 @@ impl AsyncSerialize for CompactBytes {
 }
 
 impl AsyncSerialize for Option<CompactBytes> {
+    async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
+    where
+        W: AsyncWriteExt + Send + Unpin + ?Sized,
+    {
+        if let Some(b) = self {
+            b.write_into(writer, version).await
+        } else {
+            UnsignedVarInt(0)
+                .write_into(writer, version)
+                .await
+                .context("compact bytes length")
+        }
+    }
+}
+
+pub trait Sequence {
+    /// Length of this byte sequence
+    ///
+    /// Note that this represents raw (decoded) length, while
+    /// [`encode_size`](Serialize::encode_size) represents the size after encoding.
+    fn length(&self) -> usize;
+}
+
+impl Sequence for Bytes {
+    #[inline]
+    fn length(&self) -> usize {
+        self.len()
+    }
+}
+
+/// Wrapper that performs the COMPACT encoding for a [`Sequence`] `S`
+#[derive(Clone, Debug)]
+#[repr(transparent)]
+pub struct Compact<S>(pub S);
+
+impl<S: Sequence> Compact<S> {
+    pub(crate) fn enc_len(&self) -> UnsignedVarInt {
+        UnsignedVarInt((self.0.length() as u32) + 1)
+    }
+}
+
+impl<S: Sequence> Serialize for Compact<S> {
+    #[inline]
+    fn encode_size(&self, version: i16) -> usize {
+        self.enc_len().encode_size(version) + self.0.length()
+    }
+}
+
+impl<S: Sequence> Serialize for Option<Compact<S>> {
+    #[inline]
+    fn encode_size(&self, version: i16) -> usize {
+        self.as_ref().map_or(1, |b| b.encode_size(version))
+    }
+}
+
+impl AsyncSerialize for Compact<Bytes> {
+    async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
+    where
+        W: AsyncWriteExt + Send + Unpin + ?Sized,
+    {
+        self.enc_len()
+            .write_into(writer, version)
+            .await
+            .context("compact bytes length")?;
+
+        writer.write_all(&self.0).await.context("compact bytes")
+    }
+}
+
+impl<S> AsyncSerialize for Option<Compact<S>>
+where
+    S: Sequence,
+    Compact<S>: AsyncSerialize,
+{
     async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
     where
         W: AsyncWriteExt + Send + Unpin + ?Sized,

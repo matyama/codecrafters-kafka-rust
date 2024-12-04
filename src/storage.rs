@@ -2,18 +2,225 @@ use std::collections::{BTreeMap, HashMap};
 use std::io::SeekFrom;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{bail, Context as _, Result};
 use bytes::Bytes;
 use tokio::fs::{self, File};
-use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
+use tokio::io::{self, AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt};
 use tokio::sync::{Mutex, MutexGuard, RwLock};
 use tokio::task::JoinSet;
 
 use crate::kafka::record::{RecordBatch, RecordBatchHeader, Topic, TopicRecord};
-use crate::kafka::types::{StrBytes, Uuid};
-use crate::kafka::{AsyncDeserialize, Deserialize};
+use crate::kafka::types::{Compact, Sequence, StrBytes, Uuid};
+use crate::kafka::{AsyncDeserialize, AsyncSerialize, Deserialize, Serialize};
 use crate::logs::LogDir;
+
+#[derive(Debug)]
+pub enum Store<M, F> {
+    Memory(M),
+    FileSystem(F),
+}
+
+impl<M, F> Serialize for Store<M, F>
+where
+    M: Serialize,
+    F: Serialize,
+{
+    fn encode_size(&self, version: i16) -> usize {
+        match self {
+            Self::Memory(data) => data.encode_size(version),
+            Self::FileSystem(entry) => entry.encode_size(version),
+        }
+    }
+}
+
+impl<M, F> Serialize for Compact<Store<M, F>>
+where
+    M: Serialize + Sequence,
+    F: Serialize + Sequence,
+{
+    fn encode_size(&self, version: i16) -> usize {
+        match self.0 {
+            Store::Memory(ref data) => data.encode_size(version),
+            Store::FileSystem(ref entry) => entry.encode_size(version),
+        }
+    }
+}
+
+impl<M, F> Serialize for Option<Store<M, F>>
+where
+    M: Serialize + Sequence,
+    F: Serialize + Sequence,
+{
+    // Sequence length
+    const SIZE: usize = Bytes::SIZE;
+
+    #[inline]
+    fn encode_size(&self, version: i16) -> usize {
+        self.as_ref().map_or(Self::SIZE, |b| b.encode_size(version))
+    }
+}
+
+impl<M, F> AsyncSerialize for Store<M, F>
+where
+    M: AsyncSerialize,
+    F: AsyncSerialize,
+{
+    async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
+    where
+        W: AsyncWriteExt + Send + Unpin + ?Sized,
+    {
+        match self {
+            Self::Memory(data) => data
+                .write_into(writer, version)
+                .await
+                .context("memory data"),
+
+            Self::FileSystem(entry) => entry
+                .write_into(writer, version)
+                .await
+                .context("file system entry"),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct LogRef {
+    topic: Uuid,
+    partition: i32,
+    /// Index of the corresponding [`LogFile`] in the [`PartitionIndex`]
+    index: usize,
+    /// Byte offset within the log [`File`]
+    position: u64,
+    /// The number of bytes to copy from the log [`File`], starting at `position`
+    length: u64,
+    storage: Arc<Storage>,
+}
+
+impl std::fmt::Debug for LogRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LogRef")
+            .field("topic", &self.topic)
+            .field("partition", &self.partition)
+            .field("index", &self.index)
+            .field("position", &self.position)
+            .field("length", &self.length)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Display for LogRef {
+    #[inline]
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "LogRef({}, {}, {}, {}, {})",
+            self.topic.as_hex(),
+            self.partition,
+            self.index,
+            self.position,
+            self.length,
+        )
+    }
+}
+
+impl Sequence for LogRef {
+    #[inline]
+    fn length(&self) -> usize {
+        (self.length - self.position) as usize
+    }
+}
+
+impl Serialize for LogRef {
+    #[inline]
+    fn encode_size(&self, _version: i16) -> usize {
+        self.length()
+    }
+}
+
+impl Serialize for Option<LogRef> {
+    const SIZE: usize = Bytes::SIZE;
+
+    #[inline]
+    fn encode_size(&self, version: i16) -> usize {
+        self.as_ref().map_or(Self::SIZE, |b| b.encode_size(version))
+    }
+}
+
+impl AsyncSerialize for LogRef {
+    async fn write_into<W>(self, writer: &mut W, _version: i16) -> Result<()>
+    where
+        W: AsyncWriteExt + Send + Unpin + ?Sized,
+    {
+        // XXX: it's a bit unfortunate that to keep LogRef 'static we have to re-access the File
+        let storage = self.storage.inner.read().await;
+
+        let ix = storage
+            .log_index
+            .get(&self.topic)
+            .with_context(|| format!("{self}: topic not found in storage"))?;
+
+        let ix = ix
+            .partitions
+            .get(&self.partition)
+            .with_context(|| format!("{self}: partition not found in storage"))?;
+
+        let log_file = ix
+            .get_log(self.index)
+            .with_context(|| format!("{self}: invalid log file index"))?;
+
+        let mut log_file = log_file.file.lock().await;
+        let log = &mut *log_file;
+
+        // TODO: An interesting optimization would be to use https://linux.die.net/man/2/sendfile
+        //  - sendfile(2) can send data (fd -> socket) without copying them to the userspace
+        //  - https://docs.rs/sendfile/latest/sendfile
+        //  - NOTE: codecrafters runners unfortunately don't allow modifying Cargo.lock
+
+        log.seek(SeekFrom::Start(self.position))
+            .await
+            .with_context(|| format!("{self}: invalid physical position"))?;
+
+        // NOTE: the encoded length of the response has already been written, so we must respect it
+        let mut reader = log.take(self.length() as u64);
+
+        io::copy(&mut reader, writer)
+            .await
+            .with_context(|| format!("{self}: copying log file contents"))
+            .map(|_| ())
+    }
+}
+
+impl AsyncSerialize for Option<LogRef> {
+    async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
+    where
+        W: AsyncWriteExt + Send + Unpin + ?Sized,
+    {
+        if let Some(log) = self {
+            log.write_into(writer, version).await
+        } else {
+            writer.write_i32(-1).await.context("log bytes length")
+        }
+    }
+}
+
+impl AsyncSerialize for Compact<LogRef> {
+    async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
+    where
+        W: AsyncWriteExt + Send + Unpin + ?Sized,
+    {
+        self.enc_len()
+            .write_into(writer, version)
+            .await
+            .context("compact log bytes length")?;
+
+        self.0
+            .write_into(writer, version)
+            .await
+            .context("compact log bytes contents")
+    }
+}
 
 #[derive(Debug)]
 struct LogFile {
@@ -127,11 +334,15 @@ impl PartitionIndex {
     }
 
     #[inline]
-    fn lookup_file(&self, offset: i64) -> Option<&LogFile> {
+    fn get_log(&self, index: usize) -> Option<&LogFile> {
+        self.logs.get(index)
+    }
+
+    fn lookup_file(&self, offset: i64) -> Option<(usize, &LogFile)> {
         let (Ok(ix) | Err(ix)) = self
             .logs
             .binary_search_by_key(&offset, LogFile::base_offset);
-        self.logs.get(ix)
+        self.get_log(ix).map(|file| (ix, file))
     }
 }
 
@@ -232,19 +443,28 @@ impl Storage {
 
     // TODO: Kafka does not fetch records into memory
     //  - https://www.confluent.io/blog/kafka-producer-and-consumer-internals-4-consumer-fetch-requests
-    //  - use sendfile(2) to zero-copy data (fd -> socket) https://linux.die.net/man/2/sendfile
-    //  - https://docs.rs/sendfile/latest/sendfile
-    //  - or at least something like seek + `tokio::io::{copy, copy_buf}`
-    //  - this will require changing the fetch response / response writer
     /// Fetch a record batch containing given `offset` for the `topic` and `partition`.
     ///
-    /// Note that this returns batch of raw records (file contents). This means that
+    /// Note that this function just determines the physical position of the fetched chunk of
+    /// records within the log file and defers the I/O to the message serialization phase (see the
+    /// [`impl AsyncSerialize for LogRef`](<LogRef as AsyncSerialize>)).
+    ///
+    /// Once the file offset is calculated, the response writer can perform an optimized I/O
+    /// operation without actually loading all the records to the memory.
+    ///
+    /// The returned [`LogRef`] logically represents a batch of raw records (file contents). This
+    /// means that:
     ///  1. There can (and most likely will) be multiple records returned, all inside the record
     ///     batch which includes given `offset`.
     ///  2. Record batches can in general contain offsets _smaller_ than the `offset` and it's up
     ///     to the consumer to filter these out.
+    ///
+    /// Finally, note that the `LogRef::length` is also determined here. We need to calculate the
+    /// length ahead of time, because the wire protocol specifies the encoded (message) length
+    /// before the encoded message itself. So we must commit to some record chunk at some point, we
+    /// do it here when determining the physical offset (`LogRef::position`).
     pub async fn fetch_records(
-        &self,
+        self: Arc<Self>,
         topic: Uuid,
         partition: i32,
         offset: i64,
@@ -259,12 +479,13 @@ impl Storage {
             return Ok(FetchResult::UnknownTopic);
         };
 
-        let Some(log_file) = ix.lookup_file(offset) else {
+        let Some((log_ix, log_file)) = ix.lookup_file(offset) else {
             return Ok(FetchResult::OffsetOutOfRange);
         };
 
-        // XXX: this locking is rather unfortunate
-        //  - maybe store just the path and open the file ad-hoc
+        // TODO: This lock is unfortunate, because two clients can't really fetch concurrently
+        //  - An exclusive lock is only required due to seek/rewind
+        //  - With a memory-mapped index, this would not be necessary!
         let mut log_file = log_file.lock().await;
         let log = &mut *log_file;
 
@@ -276,36 +497,45 @@ impl Storage {
         //    (see https://stackoverflow.com/a/30233048)
         //  - So this file offset lookup can be made just based on the index without ever touching
         //    the data (log file)
-        //  - Once the file offset is calculated, the response writer can perform single `sendfile`
-        //    syscall to write the records to the socket without actually copying them to userspace
         //  - So this really should be part of an increment indexing (segments are immutable,
         //    modulo the active one, which is append-only, and discarding due to retention)
-        let batch = loop {
+        let records = loop {
             let Some(header) = try_read_header(log, batch_start)
                 .await
                 .context("failed to read batch header")?
             else {
-                break Bytes::new();
+                break Store::Memory(None);
             };
 
             if header.contains(offset) {
                 // hit: read the rest of the log file, starting with this batch
 
-                let batch_len = header.batch_length as usize;
-                let mut buf = Vec::with_capacity(batch_len);
+                // XXX: fsync before? or seek end?
+                //log.sync_all().await.context("sync log file")?;
+                let metadata = log.metadata().await.context("retrieve log file metadata")?;
+                let log_len = metadata.len();
 
-                // serialize the header into the buffer (so we don't have to issue a seek)
-                let Ok(_) = header.encode(&mut buf) else {
-                    unreachable!("buffer has sufficient capacity for the whole batch");
+                //let log_len = log
+                //    .seek(SeekFrom::End(0))
+                //    .await
+                //    .context("seek the log file end")?;
+
+                let length = log_len - batch_start;
+
+                let log_ref = if length > 0 {
+                    Some(LogRef {
+                        topic,
+                        partition,
+                        index: log_ix,
+                        position: batch_start,
+                        length,
+                        storage: Arc::clone(&self),
+                    })
+                } else {
+                    None
                 };
 
-                let _ = log
-                    .read_to_end(&mut buf)
-                    .await
-                    .context("failed to read batch records");
-
-                buf.shrink_to_fit();
-                break Bytes::from(buf);
+                break Store::FileSystem(log_ref);
             }
 
             // otherwise seek/skip over the contents of the current batch
@@ -315,11 +545,7 @@ impl Storage {
                 .context("seek next batch")?;
         };
 
-        Ok(FetchResult::Records(if batch.is_empty() {
-            None
-        } else {
-            Some(batch)
-        }))
+        Ok(FetchResult::Records(records))
     }
 }
 
@@ -345,7 +571,7 @@ async fn try_read_header(log: &mut File, batch_start: u64) -> Result<Option<Reco
 }
 
 pub enum FetchResult {
-    Records(Option<Bytes>),
+    Records(Store<Option<Bytes>, Option<LogRef>>),
     UnknownTopic,
     OffsetOutOfRange,
 }

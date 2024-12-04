@@ -1,7 +1,7 @@
 use std::io::Cursor;
 
 use anyhow::{bail, ensure, Context as _, Result};
-use bytes::{Buf, BufMut, Bytes};
+use bytes::{Buf, Bytes};
 use tokio::io::AsyncReadExt;
 
 use crate::kafka::types::{Array, StrBytes, VarInt, VarLong};
@@ -39,30 +39,6 @@ impl RecordBatchHeader {
     #[inline]
     pub fn contains(&self, offset: i64) -> bool {
         (self.base_offset..=self.base_offset + self.last_offset_delta as i64).contains(&offset)
-    }
-
-    // TODO: move this to the Serialize trait (requires updating all existing impls)
-    #[allow(dead_code)]
-    pub(crate) fn encode<B: BufMut>(self, buf: &mut B) -> Result<()> {
-        ensure!(
-            buf.remaining_mut() >= Self::SIZE,
-            "insufficient buffer capacity"
-        );
-
-        buf.put_i64(self.base_offset);
-        buf.put_i32(self.batch_length);
-        buf.put_i32(self.partition_leader_epoch);
-        buf.put_i8(self.magic);
-        buf.put_u32(self.crc);
-        buf.put_i16(self.attributes.into());
-        buf.put_i32(self.last_offset_delta);
-        buf.put_i64(self.base_timestamp);
-        buf.put_i64(self.max_timestamp);
-        buf.put_i64(self.producer_id);
-        buf.put_i16(self.producer_epoch);
-        buf.put_i32(self.base_sequence);
-
-        Ok(())
     }
 }
 
