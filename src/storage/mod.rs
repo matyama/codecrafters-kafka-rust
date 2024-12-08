@@ -332,58 +332,70 @@ async fn index_logs(
 }
 
 async fn index_partition(index: &mut PartitionIndex) -> Result<()> {
+    debug_assert!(
+        index.segments.is_empty(),
+        "indexing partition with non-empty segments"
+    );
+
     let mut dir = fs::read_dir(&index.dir)
         .await
         .context("failed to read partition dir")?;
 
-    let mut needs_sorting = false;
-    let mut prev_offset = -1;
+    let mut tasks = JoinSet::new();
 
-    // TODO: index concurrently (but note that segments must be inserted in order!)
     while let Some(entry) = dir.next_entry().await.context("next dir entry")? {
         let path = entry.path();
         if let Some("log") = path.extension().and_then(|ext| ext.to_str()) {
             debug_assert!(path.is_file(), "'.log' should indicate a file");
-
-            let Some(filename) = path.file_name().and_then(|name| name.to_str()) else {
-                bail!("invalid log file {path:?}");
-            };
-
-            let Some(base_offset) = filename.strip_suffix(".log") else {
-                unreachable!("path has already been checked for the '.log' extension");
-            };
-
-            let base_offset = base_offset.parse().with_context(|| {
-                format!("'{base_offset}' does not encode a valid i64 base offset")
-            })?;
-
-            let log_file = fs::File::options()
-                .read(true)
-                .append(true)
-                .open(&path)
-                .await
-                .context("failed to open log file")?;
-
-            let mut log = LogFile::new(base_offset, path, log_file);
-
-            let log_index = index_log(&mut log)
-                .await
-                .with_context(|| format!("failed to index log file {:?}", log.path()))?;
-
-            //println!("{:?}: {log_index}", log.path());
-
-            index.segments.push(Segment::new(log, log_index));
-
-            needs_sorting &= prev_offset < base_offset;
-            prev_offset = base_offset;
+            tasks.spawn(index_segment(path));
         }
     }
 
-    if needs_sorting {
-        index.segments.sort_unstable_by_key(Segment::base_offset);
+    index.segments.reserve(tasks.len());
+
+    while let Some(result) = tasks.join_next().await {
+        match result {
+            Ok(Ok(segment)) => index.segments.push(segment),
+            Ok(Err(e)) => bail!(e),
+            Err(e) if e.is_cancelled() => tokio::task::yield_now().await,
+            Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+            Err(e) => unreachable!("task neither panicked nor has been canceled: {e:?}"),
+        }
     }
 
+    index.segments.sort_unstable_by_key(Segment::base_offset);
+
     Ok(())
+}
+
+async fn index_segment(path: PathBuf) -> Result<Segment> {
+    let Some(filename) = path.file_name().and_then(|name| name.to_str()) else {
+        bail!("invalid log file {path:?}");
+    };
+
+    let Some(base_offset) = filename.strip_suffix(".log") else {
+        unreachable!("path has already been checked for the '.log' extension");
+    };
+
+    let base_offset = base_offset
+        .parse()
+        .with_context(|| format!("'{base_offset}' does not encode a valid i64 base offset"))?;
+
+    let log_file = fs::File::options()
+        .read(true)
+        .append(true)
+        .open(&path)
+        .await
+        .context("failed to open log file")?;
+
+    let mut log = LogFile::new(base_offset, path, log_file);
+
+    let index = index_log(&mut log)
+        .await
+        .with_context(|| format!("failed to index log file {:?}", log.path()))?;
+
+    //println!("{:?}: {index}", log.path());
+    Ok(Segment::new(log, index))
 }
 
 async fn index_log(log: &mut LogFile) -> Result<LogIndex> {
