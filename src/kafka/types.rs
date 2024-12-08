@@ -472,6 +472,44 @@ impl AsyncSerialize for Option<Bytes> {
     }
 }
 
+impl Deserialize for Bytes {
+    fn decode<B: Buf>(buf: &mut B, _version: i16) -> Result<(Self, usize)> {
+        ensure!(
+            buf.remaining() >= Self::SIZE,
+            "not enough bytes left in the buffer"
+        );
+
+        let len = usize::try_from(buf.get_i32()).context("invalid bytes length")?;
+
+        ensure!(
+            buf.remaining() >= len,
+            "not enough bytes left in the buffer"
+        );
+
+        Ok((buf.copy_to_bytes(len), 4 + len))
+    }
+}
+
+impl AsyncDeserialize for Bytes {
+    async fn read_from<R>(reader: &mut R, _version: i16) -> Result<(Self, usize)>
+    where
+        R: AsyncReadExt + Send + Unpin,
+    {
+        let len = reader
+            .read_i32()
+            .await
+            .context("reading bytes length")
+            .and_then(|len| usize::try_from(len).context("invalid bytes length"))?;
+
+        let mut buf = BytesMut::with_capacity(len);
+        buf.resize(len, 0);
+
+        reader.read_exact(&mut buf).await.context("reading bytes")?;
+
+        Ok((buf.freeze(), 4 + len))
+    }
+}
+
 pub trait Sequence {
     /// Length of this byte sequence
     ///

@@ -6,15 +6,22 @@ use std::sync::Arc;
 
 use anyhow::{bail, Context as _, Result};
 use bytes::Bytes;
-use tokio::fs::{self, File};
-use tokio::io::{self, AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt};
-use tokio::sync::{Mutex, MutexGuard, RwLock};
+use tokio::fs;
+use tokio::io::{AsyncSeekExt as _, AsyncWriteExt};
+use tokio::sync::RwLock;
 use tokio::task::JoinSet;
 
-use crate::kafka::record::{RecordBatch, RecordBatchHeader, Topic, TopicRecord};
+use self::segment::index::LogIndex;
+use self::segment::log::LogFile;
+use self::segment::Segment;
+use crate::kafka::record::{BatchHeader, RecordBatch, RecordBatchHeader, Topic, TopicRecord};
 use crate::kafka::types::{Compact, Sequence, StrBytes, Uuid};
 use crate::kafka::{AsyncDeserialize, AsyncSerialize, Deserialize, Serialize};
 use crate::logs::LogDir;
+
+pub(crate) use self::segment::log::LogRef;
+
+pub(crate) mod segment;
 
 #[derive(Debug)]
 pub enum Store<M, F> {
@@ -85,241 +92,14 @@ where
     }
 }
 
-#[derive(Clone)]
-pub struct LogRef {
-    topic: Uuid,
-    partition: i32,
-    /// Index of the corresponding [`LogFile`] in the [`PartitionIndex`]
-    index: usize,
-    /// Byte offset within the log [`File`]
-    position: u64,
-    /// The number of bytes to copy from the log [`File`], starting at `position`
-    length: u64,
-    storage: Arc<Storage>,
-}
-
-impl std::fmt::Debug for LogRef {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LogRef")
-            .field("topic", &self.topic)
-            .field("partition", &self.partition)
-            .field("index", &self.index)
-            .field("position", &self.position)
-            .field("length", &self.length)
-            .finish_non_exhaustive()
-    }
-}
-
-impl std::fmt::Display for LogRef {
-    #[inline]
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "LogRef({}, {}, {}, {}, {})",
-            self.topic.as_hex(),
-            self.partition,
-            self.index,
-            self.position,
-            self.length,
-        )
-    }
-}
-
-impl Sequence for LogRef {
-    #[inline]
-    fn length(&self) -> usize {
-        (self.length - self.position) as usize
-    }
-}
-
-impl Serialize for LogRef {
-    #[inline]
-    fn encode_size(&self, _version: i16) -> usize {
-        self.length()
-    }
-}
-
-impl Serialize for Option<LogRef> {
-    const SIZE: usize = Bytes::SIZE;
-
-    #[inline]
-    fn encode_size(&self, version: i16) -> usize {
-        self.as_ref().map_or(Self::SIZE, |b| b.encode_size(version))
-    }
-}
-
-impl AsyncSerialize for LogRef {
-    async fn write_into<W>(self, writer: &mut W, _version: i16) -> Result<()>
-    where
-        W: AsyncWriteExt + Send + Unpin + ?Sized,
-    {
-        // XXX: it's a bit unfortunate that to keep LogRef 'static we have to re-access the File
-        let storage = self.storage.inner.read().await;
-
-        let ix = storage
-            .log_index
-            .get(&self.topic)
-            .with_context(|| format!("{self}: topic not found in storage"))?;
-
-        let ix = ix
-            .partitions
-            .get(&self.partition)
-            .with_context(|| format!("{self}: partition not found in storage"))?;
-
-        let log_file = ix
-            .get_log(self.index)
-            .with_context(|| format!("{self}: invalid log file index"))?;
-
-        let mut log_file = log_file.file.lock().await;
-        let log = &mut *log_file;
-
-        // TODO: An interesting optimization would be to use https://linux.die.net/man/2/sendfile
-        //  - sendfile(2) can send data (fd -> socket) without copying them to the userspace
-        //  - https://docs.rs/sendfile/latest/sendfile
-        //  - NOTE: codecrafters runners unfortunately don't allow modifying Cargo.lock
-
-        log.seek(SeekFrom::Start(self.position))
-            .await
-            .with_context(|| format!("{self}: invalid physical position"))?;
-
-        // NOTE: the encoded length of the response has already been written, so we must respect it
-        let mut reader = log.take(self.length() as u64);
-
-        io::copy(&mut reader, writer)
-            .await
-            .with_context(|| format!("{self}: copying log file contents"))
-            .map(|_| ())
-    }
-}
-
-impl AsyncSerialize for Option<LogRef> {
-    async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
-    where
-        W: AsyncWriteExt + Send + Unpin + ?Sized,
-    {
-        if let Some(log) = self {
-            log.write_into(writer, version).await
-        } else {
-            writer.write_i32(-1).await.context("log bytes length")
-        }
-    }
-}
-
-impl AsyncSerialize for Compact<LogRef> {
-    async fn write_into<W>(self, writer: &mut W, version: i16) -> Result<()>
-    where
-        W: AsyncWriteExt + Send + Unpin + ?Sized,
-    {
-        self.enc_len()
-            .write_into(writer, version)
-            .await
-            .context("compact log bytes length")?;
-
-        self.0
-            .write_into(writer, version)
-            .await
-            .context("compact log bytes contents")
-    }
-}
-
-#[derive(Debug)]
-struct LogFile {
-    /// min offset of the log file (also contained in the file name)
-    base_offset: i64,
-    #[allow(dead_code)]
-    /// file location
-    path: PathBuf,
-    /// open log file
-    file: Mutex<File>,
-}
-
-impl LogFile {
-    #[inline]
-    fn new(base_offset: i64, path: PathBuf, file: File) -> Self {
-        Self {
-            base_offset,
-            path,
-            file: Mutex::new(file),
-        }
-    }
-
-    #[inline]
-    fn base_offset(&self) -> i64 {
-        self.base_offset
-    }
-
-    #[inline]
-    async fn lock(&self) -> MutexGuard<'_, File> {
-        self.file.lock().await
-    }
-}
-
-//#[derive(Debug)]
-//struct IndexEntry {
-//    /// offset relative to the base offset
-//    relative_offset: i64,
-//    /// byte offset within the log file
-//    physical_position: i32,
-//}
-//
-// TODO: Kafka uses a .index file instead
-//  - most likely does not manage this in memory
-//  - it still may do a binary search seeks on the .index file, given that all entries have
-//    uniform size
-//  - https://stackoverflow.com/a/30233048
-//  - https://github.com/apache/kafka/blob/trunk/storage/src/main/java/org/apache/kafka/storage/internals/log/OffsetIndex.java
-//  - apparently Kafka mmaps the index file to do the search
-//  - https://docs.rs/memmap2/latest/memmap2
-///// Append-only index of record offset-to-position for a corresponding log file
-//#[derive(Debug)]
-//struct LogIndex {
-//    base_offset: i64,
-//    // path: PathBuf,
-//    /// Index entries with monotonically increasing relative offsets
-//    entries: Vec<IndexEntry>,
-//}
-//
-//impl LogIndex {
-//    fn lookup(&self, offset: i64) -> Result<&IndexEntry, Option<&IndexEntry>> {
-//        match self.entries.binary_search_by_key(&offset, |entry| {
-//            self.base_offset + entry.relative_offset as i64
-//        }) {
-//            // SAFETY: index returned by a binary search hit, so must be within bounds
-//            Ok(i) => Ok(unsafe { self.entries.get_unchecked(i) }),
-//            Err(i) => Err(self.entries.get(i)),
-//        }
-//    }
-//
-//    fn append(&mut self, offset: i64, position: i32) -> Result<()> {
-//        use anyhow::ensure;
-//
-//        ensure!(offset > self.base_offset, "offset <= base offset");
-//        let relative_offset = offset - self.base_offset;
-//
-//        if let Some(last) = self.entries.last() {
-//            ensure!(
-//                relative_offset > last.relative_offset,
-//                "offset <= last offset"
-//            );
-//        }
-//
-//        self.entries.push(IndexEntry {
-//            relative_offset,
-//            physical_position: position,
-//        });
-//
-//        Ok(())
-//    }
-//}
-
 #[derive(Debug)]
 struct PartitionIndex {
     //topic: Topic,
     //partition: i32,
     /// path to the partition directory
     dir: PathBuf,
-    /// vector of (base offset, log file) pairs, sorted by the offset (asc)
-    logs: Vec<LogFile>,
+    /// vector of log [`Segment`]s, sorted by their base offsets (asc)
+    segments: Vec<Segment>,
 }
 
 impl PartitionIndex {
@@ -329,20 +109,20 @@ impl PartitionIndex {
             //topic: topic.clone(),
             //partition,
             dir: dir.as_ref().to_path_buf(),
-            logs: Vec::new(),
+            segments: Vec::new(),
         }
     }
 
     #[inline]
-    fn get_log(&self, index: usize) -> Option<&LogFile> {
-        self.logs.get(index)
+    fn get_segment(&self, index: usize) -> Option<&Segment> {
+        self.segments.get(index)
     }
 
-    fn lookup_file(&self, offset: i64) -> Option<(usize, &LogFile)> {
+    fn lookup_segment(&self, offset: i64) -> Option<(usize, &Segment)> {
         let (Ok(ix) | Err(ix)) = self
-            .logs
-            .binary_search_by_key(&offset, LogFile::base_offset);
-        self.get_log(ix).map(|file| (ix, file))
+            .segments
+            .binary_search_by_key(&offset, Segment::base_offset);
+        self.get_segment(ix).map(|file| (ix, file))
     }
 }
 
@@ -441,8 +221,6 @@ impl Storage {
         Some((topic.topic_id(), partitions, next))
     }
 
-    // TODO: Kafka does not fetch records into memory
-    //  - https://www.confluent.io/blog/kafka-producer-and-consumer-internals-4-consumer-fetch-requests
     /// Fetch a record batch containing given `offset` for the `topic` and `partition`.
     ///
     /// Note that this function just determines the physical position of the fetched chunk of
@@ -452,7 +230,7 @@ impl Storage {
     /// Once the file offset is calculated, the response writer can perform an optimized I/O
     /// operation without actually loading all the records to the memory.
     ///
-    /// The returned [`LogRef`] logically represents a batch of raw records (file contents). This
+    /// The returned `LogRef` logically represents a batch of raw records (file contents). This
     /// means that:
     ///  1. There can (and most likely will) be multiple records returned, all inside the record
     ///     batch which includes given `offset`.
@@ -479,97 +257,38 @@ impl Storage {
             return Ok(FetchResult::UnknownTopic);
         };
 
-        let Some((log_ix, log_file)) = ix.lookup_file(offset) else {
+        let Some((segment_ix, segment)) = ix.lookup_segment(offset) else {
             return Ok(FetchResult::OffsetOutOfRange);
         };
 
-        // TODO: This lock is unfortunate, because two clients can't really fetch concurrently
-        //  - An exclusive lock is only required due to seek/rewind
-        //  - With a memory-mapped index, this would not be necessary!
-        let mut log_file = log_file.lock().await;
-        let log = &mut *log_file;
+        let index = segment.index();
 
-        // start at the beginning of the log file
-        let mut batch_start = log.rewind().await.context("seek to start of the log")?;
+        // Search a physical record batch position using the index (i.e., without touching the log)
+        let records = match index.lookup(offset) {
+            Some(entry) => {
+                // TODO: store this info within the LogIndex or LogFile
+                //  - then this match could be turned into a nicer map_or_else
+                let log_len = segment.log().len().await.context("fetch records")?;
 
-        // TODO: Kafka uses a separate index file alongside each log (i.e., per segment) for this
-        //  - The index contains the file offset of each record (batch)
-        //    (see https://stackoverflow.com/a/30233048)
-        //  - So this file offset lookup can be made just based on the index without ever touching
-        //    the data (log file)
-        //  - So this really should be part of an increment indexing (segments are immutable,
-        //    modulo the active one, which is append-only, and discarding due to retention)
-        let records = loop {
-            let Some(header) = try_read_header(log, batch_start)
-                .await
-                .context("failed to read batch header")?
-            else {
-                break Store::Memory(None);
-            };
+                let log_ref = LogRef::new(
+                    topic,
+                    partition,
+                    segment_ix,
+                    entry.position as u64,
+                    log_len - entry.offset as u64,
+                    Arc::clone(&self),
+                );
 
-            if header.contains(offset) {
-                // hit: read the rest of the log file, starting with this batch
-
-                // XXX: fsync before? or seek end?
-                //log.sync_all().await.context("sync log file")?;
-                let metadata = log.metadata().await.context("retrieve log file metadata")?;
-                let log_len = metadata.len();
-
-                //let log_len = log
-                //    .seek(SeekFrom::End(0))
-                //    .await
-                //    .context("seek the log file end")?;
-
-                let length = log_len - batch_start;
-
-                let log_ref = if length > 0 {
-                    Some(LogRef {
-                        topic,
-                        partition,
-                        index: log_ix,
-                        position: batch_start,
-                        length,
-                        storage: Arc::clone(&self),
-                    })
-                } else {
-                    None
-                };
-
-                break Store::FileSystem(log_ref);
+                Store::FileSystem(log_ref)
             }
-
-            // otherwise seek/skip over the contents of the current batch
-            batch_start = log
-                .seek(SeekFrom::Current(header.records_len() as i64))
-                .await
-                .context("seek next batch")?;
+            None => Store::Memory(None),
         };
 
         Ok(FetchResult::Records(records))
     }
 }
 
-async fn try_read_header(log: &mut File, batch_start: u64) -> Result<Option<RecordBatchHeader>> {
-    use std::io::{Error, ErrorKind};
-    match RecordBatchHeader::read(log).await {
-        Ok((header, _)) => Ok(Some(header)),
-        Err(e) if batch_start == 0 => match e.downcast::<Error>() {
-            Ok(e) if matches!(e.kind(), ErrorKind::UnexpectedEof) => {
-                // check whether the log file is actually empty
-                let meta = log.metadata().await.context("log file metadata")?;
-                if meta.len() > 0 {
-                    Err(e).context("unexpected EOF on non-empty log file")
-                } else {
-                    Ok(None)
-                }
-            }
-            Ok(e) => Err(e).context("I/O error other than unexpected EOF"),
-            Err(e) => Err(e).context("not an I/O error"),
-        },
-        Err(e) => Err(e).context("non-empty log file: not a first batch in the log"),
-    }
-}
-
+#[derive(Debug)]
 pub enum FetchResult {
     Records(Store<Option<Bytes>, Option<LogRef>>),
     UnknownTopic,
@@ -620,6 +339,7 @@ async fn index_partition(index: &mut PartitionIndex) -> Result<()> {
     let mut needs_sorting = false;
     let mut prev_offset = -1;
 
+    // TODO: index concurrently (but note that segments must be inserted in order!)
     while let Some(entry) = dir.next_entry().await.context("next dir entry")? {
         let path = entry.path();
         if let Some("log") = path.extension().and_then(|ext| ext.to_str()) {
@@ -639,12 +359,20 @@ async fn index_partition(index: &mut PartitionIndex) -> Result<()> {
 
             let log_file = fs::File::options()
                 .read(true)
-                .write(true)
+                .append(true)
                 .open(&path)
                 .await
                 .context("failed to open log file")?;
 
-            index.logs.push(LogFile::new(base_offset, path, log_file));
+            let mut log = LogFile::new(base_offset, path, log_file);
+
+            let log_index = index_log(&mut log)
+                .await
+                .with_context(|| format!("failed to index log file {:?}", log.path()))?;
+
+            //println!("{:?}: {log_index}", log.path());
+
+            index.segments.push(Segment::new(log, log_index));
 
             needs_sorting &= prev_offset < base_offset;
             prev_offset = base_offset;
@@ -652,10 +380,67 @@ async fn index_partition(index: &mut PartitionIndex) -> Result<()> {
     }
 
     if needs_sorting {
-        index.logs.sort_unstable_by_key(LogFile::base_offset);
+        index.segments.sort_unstable_by_key(Segment::base_offset);
     }
 
     Ok(())
+}
+
+async fn index_log(log: &mut LogFile) -> Result<LogIndex> {
+    //let path = log.path().to_path_buf();
+    //println!("indexing log file {path:?}");
+    let mut index = LogIndex::new(log.base_offset());
+
+    let file = log.as_mut();
+    let metadata = file.metadata().await.context("log file metadata")?;
+
+    let file_end = metadata.len();
+    let read_end = match file_end.checked_sub(BatchHeader::SIZE as u64) {
+        Some(0) | None => return Ok(index),
+        Some(n) => n,
+    };
+
+    let mut batch_start = file.rewind().await.context("seek to start of the log")?;
+
+    while batch_start < read_end {
+        //println!("{path:?}: start={batch_start} read_end={read_end} file_end={file_end}");
+
+        let (header, _header_len) = RecordBatchHeader::read(file)
+            .await
+            .context("read batch header")?;
+
+        // TODO: dig deeper into this, it's odd to have "corrupted" data in the test set
+        // NOTE: sanity check so we don't include some partially written data
+        if header.batch_length as u64 > file_end - batch_start {
+            eprintln!(
+                "{:?}: indexing interrupted after reading {header:?}: remaining ({})",
+                log.path(),
+                file_end - batch_start
+            );
+            break;
+        }
+
+        //println!(
+        //    "{path:?}: start={batch_start} len={} header={header:?}",
+        //    header_len + header.records_len()
+        //);
+
+        // append new index entry for this batch of records
+        index
+            .append(header.base_offset, batch_start as i32)
+            .with_context(|| format!("failed to index batch: {header:?}"))?;
+
+        // seek/skip over the contents of the current batch
+        batch_start = file
+            .seek(SeekFrom::Current(header.records_len() as i64))
+            .await
+            .context("seek next batch")?;
+
+        // cooperatively yield back to the scheduler
+        tokio::task::yield_now().await;
+    }
+
+    Ok(index)
 }
 
 async fn lookup_topics(log_dirs: &[LogDir]) -> Result<Vec<Topic>> {

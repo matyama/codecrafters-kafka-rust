@@ -13,6 +13,70 @@ pub(crate) mod feature_level;
 pub(crate) mod partition;
 pub(crate) mod topic;
 
+#[derive(Debug)]
+pub struct BatchHeader {
+    base_offset: i64,
+    batch_length: i32,
+    /// Either partition leader epoch (default) or CRC (legacy) depending on `magic`
+    data: i32,
+    magic: i8,
+}
+
+impl Serialize for BatchHeader {
+    const SIZE: usize = 8 + 4 + 4 + 1;
+
+    #[inline]
+    fn encode_size(&self, _version: i16) -> usize {
+        Self::SIZE
+    }
+}
+
+impl Deserialize for BatchHeader {
+    const DEFAULT_VERSION: i16 = 2;
+
+    fn decode<B: Buf>(buf: &mut B, _version: i16) -> Result<(Self, usize)> {
+        ensure!(
+            buf.remaining() >= Self::SIZE,
+            "expected buffer to have at least {}B left",
+            Self::SIZE
+        );
+
+        let header = Self {
+            base_offset: buf.get_i64(),
+            batch_length: buf.get_i32(),
+            data: buf.get_i32(),
+            magic: buf.get_i8(),
+        };
+
+        ensure!(
+            header.batch_length > 0,
+            "record batch length must be positive i32"
+        );
+
+        Ok((header, Self::SIZE))
+    }
+}
+
+impl AsyncDeserialize for BatchHeader {
+    const DEFAULT_VERSION: i16 = <Self as Deserialize>::DEFAULT_VERSION;
+
+    async fn read_from<R>(reader: &mut R, version: i16) -> Result<(Self, usize)>
+    where
+        R: AsyncReadExt + Send + Unpin,
+    {
+        let mut buf = [0; Self::SIZE];
+
+        reader
+            .read_exact(&mut buf)
+            .await
+            .context("reading batch header info")?;
+
+        let mut buf = Cursor::new(&mut buf);
+
+        Self::decode(&mut buf, version).context("record batch header info")
+    }
+}
+
 /// See official docs for [Record Batch](https://kafka.apache.org/documentation/#recordbatch).
 #[derive(Debug, PartialEq)]
 pub struct RecordBatchHeader {
@@ -32,6 +96,18 @@ pub struct RecordBatchHeader {
 
 impl RecordBatchHeader {
     #[inline]
+    const fn enc_size(version: i16) -> usize {
+        match version {
+            // Legacy versions
+            0 => BatchHeader::SIZE + 1,
+            1 => BatchHeader::SIZE + 1 + 8,
+            // Default version
+            2.. => Self::SIZE,
+            _ => panic!("negative versions are not supported"),
+        }
+    }
+
+    #[inline]
     pub fn records_len(&self) -> usize {
         (self.batch_length as usize).saturating_sub(Self::SIZE)
     }
@@ -40,14 +116,68 @@ impl RecordBatchHeader {
     pub fn contains(&self, offset: i64) -> bool {
         (self.base_offset..=self.base_offset + self.last_offset_delta as i64).contains(&offset)
     }
+
+    /// Decode batch header for the [old message format][docs]
+    ///
+    /// [docs]: https://kafka.apache.org/documentation/#messageset
+    fn decode_legacy<B: Buf>(buf: &mut B, header: BatchHeader) -> Result<(Self, usize)> {
+        debug_assert!(
+            header.magic == 0 || header.magic == 1,
+            "legacy versions are either 0 or 1, got: {}",
+            header.magic
+        );
+
+        println!("decoding legacy header: {header:?}");
+
+        let mut size = 0;
+
+        println!("decoding legacy attributes");
+        let (attributes, n) = i8::deserialize(buf).context("attributes")?;
+        size += n;
+
+        let attributes = RecordBatchAttrs::decode_legacy(attributes, header.magic)
+            .context("invalid batch attributes")?;
+
+        let (timestamp, n) = if header.magic > 0 {
+            i64::deserialize(buf).context("timestamp")?
+        } else {
+            (-1, 0)
+        };
+        size += n;
+
+        // TODO: decompress the rest of the buffer (based on `attributes.compression`)
+        debug_assert_eq!(
+            attributes.compression,
+            Compression::None,
+            "compression is not yet supported"
+        );
+
+        let header = Self {
+            base_offset: header.base_offset,
+            batch_length: header.batch_length,
+            partition_leader_epoch: -1,
+            magic: header.magic,
+            crc: header.data as u32,
+            attributes,
+            // NOTE: legacy batches contain/are only one record, so base offset is also the last
+            last_offset_delta: 0,
+            base_timestamp: timestamp,
+            max_timestamp: timestamp,
+            producer_id: -1,
+            producer_epoch: -1,
+            base_sequence: -1,
+        };
+
+        Ok((header, size))
+    }
 }
 
 impl Serialize for RecordBatchHeader {
-    const SIZE: usize = 8 + 4 + 4 + 1 + 4 + 2 + 4 + 8 + 8 + 8 + 2 + 4;
+    const SIZE: usize = BatchHeader::SIZE + 4 + 2 + 4 + 8 + 8 + 8 + 2 + 4;
 
     #[inline]
-    fn encode_size(&self, _version: i16) -> usize {
-        Self::SIZE
+    fn encode_size(&self, version: i16) -> usize {
+        Self::enc_size(version)
     }
 }
 
@@ -55,27 +185,10 @@ impl Deserialize for RecordBatchHeader {
     const DEFAULT_VERSION: i16 = 2;
 
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
-        let mut size = 0;
+        let (header, mut size) = BatchHeader::decode(buf, version).context("batch header info")?;
 
-        let (base_offset, n) = i64::deserialize(buf).context("base_offset")?;
-        size += n;
-
-        let (batch_length, n) = i32::deserialize(buf).context("batch_length")?;
-        size += n;
-        ensure!(batch_length > 0, "record batch length must be positive i32");
-
-        let (partition_leader_epoch, n) =
-            i32::deserialize(buf).context("partition_leader_epoch")?;
-        size += n;
-
-        let (magic, n) = i8::deserialize(buf).context("magic")?;
-        size += n;
-
-        ensure!(magic as i16 == version, "record batch: magic != version");
-
-        match magic {
-            // TODO: support reading record batch format v0 and v1
-            0..=1 => unimplemented!("legacy record batch format is unsupported"),
+        match header.magic {
+            0..=1 => return Self::decode_legacy(buf, header).context("decode legacy"),
             2 => {}
             version => bail!("unknown record batch version: {version}"),
         }
@@ -115,10 +228,10 @@ impl Deserialize for RecordBatchHeader {
         );
 
         let header = RecordBatchHeader {
-            base_offset,
-            batch_length,
-            partition_leader_epoch,
-            magic,
+            base_offset: header.base_offset,
+            batch_length: header.batch_length,
+            partition_leader_epoch: header.data,
+            magic: header.magic,
             crc,
             attributes,
             last_offset_delta,
@@ -141,15 +254,30 @@ impl AsyncDeserialize for RecordBatchHeader {
     where
         R: AsyncReadExt + Send + Unpin,
     {
+        // Allocate buffer for the default version (which is large enough for legacy versions)
         let mut buf = [0; Self::SIZE];
 
+        // First read the initial portion of the header up to the magic
         let n = reader
-            .read_exact(&mut buf)
+            .read_exact(&mut buf[..BatchHeader::SIZE])
+            .await
+            .context("reading batch header info")?;
+
+        // Read the last byte (magic) from the initial part of the header
+        let magic = buf[n - 1] as i8;
+
+        // Determine the actual buffer size depending on parsed magic/version
+        let size = Self::enc_size(magic as i16);
+
+        // Read the rest of the header
+        reader
+            .read_exact(&mut buf[n..size])
             .await
             .context("reading batch header")?;
 
-        let mut buf = Cursor::new(&mut buf[..n]);
+        let mut buf = Cursor::new(&mut buf[..size]);
 
+        // Decode the whole header buffer
         Self::decode(&mut buf, version).context("record batch header")
     }
 }
@@ -219,8 +347,22 @@ impl Deserialize for RecordBatch {
         let (header, header_size) =
             RecordBatchHeader::decode(buf, version).context("record batch header")?;
 
-        let (Array(records), records_size) =
-            Deserialize::decode(buf, version).context("record batch records")?;
+        let (records, records_size) = match header.magic {
+            version @ (0..=1) => {
+                // NOTE: Although message sets are represented as an array, they are not preceded
+                // by an int32 array size like other array elements in the protocol. So decoding
+                // one record at a time is fine (and thus forming singleton legacy batches).
+                let (record, record_size) = Record::decode(buf, version as i16)?;
+                debug_assert_eq!(record_size, header.records_len());
+                (vec![record], record_size)
+            }
+            version @ (2..) => {
+                let (Array(records), records_size) =
+                    Deserialize::decode(buf, version as i16).context("record batch records")?;
+                (records, records_size)
+            }
+            version => bail!("unsupported version: {version}"),
+        };
 
         Ok((Self::new(header, records), header_size + records_size))
     }
@@ -238,18 +380,35 @@ impl AsyncDeserialize for RecordBatch {
             .await
             .context("record batch header")?;
 
-        // TODO: impl AsyncDeserialize for BatchRecords
-        let mut buf = vec![0; header.records_len()];
+        let (records, records_size) = match header.magic {
+            version @ (0..=1) => {
+                // NOTE: Although message sets are represented as an array, they are not preceded
+                // by an int32 array size like other array elements in the protocol. So decoding
+                // one record at a time is fine (and thus forming singleton legacy batches).
+                let (record, record_size) = Record::read_from(reader, version as i16).await?;
+                debug_assert_eq!(record_size, header.records_len());
+                (vec![record], record_size)
+            }
 
-        reader
-            .read_exact(&mut buf)
-            .await
-            .context("reading batch records")?;
+            version @ (2..) => {
+                // TODO: impl AsyncDeserialize for BatchRecords
+                let mut buf = vec![0; header.records_len()];
 
-        let mut buf = Cursor::new(buf);
+                reader
+                    .read_exact(&mut buf)
+                    .await
+                    .context("reading batch records")?;
 
-        let (Array(records), records_size) =
-            Deserialize::deserialize(&mut buf).context("record batch records")?;
+                let mut buf = Cursor::new(buf);
+
+                let (Array(records), records_size) = Deserialize::decode(&mut buf, version as i16)
+                    .context("record batch records")?;
+
+                (records, records_size)
+            }
+
+            version => bail!("unsupported version: {version}"),
+        };
 
         let size = header.batch_length as usize;
         debug_assert_eq!(size, header_size + records_size);
@@ -278,6 +437,19 @@ pub struct RecordBatchAttrs {
     /// horizon for compaction.
     pub has_delete_horizon_ms: bool,
     // bit 7~15: unused
+}
+
+impl RecordBatchAttrs {
+    /// Decode legacy attributes for `magic` in `{0, 1}`
+    fn decode_legacy(attributes: i8, version: i8) -> Result<Self> {
+        Ok(Self {
+            compression: Compression::decode_legacy(attributes, version).context("compression")?,
+            timestamp_type: TimestampType::from(attributes),
+            is_transactional: false,
+            is_control: false,
+            has_delete_horizon_ms: false,
+        })
+    }
 }
 
 impl TryFrom<i16> for RecordBatchAttrs {
@@ -336,8 +508,55 @@ pub struct Record {
     pub headers: Vec<Header>,
 }
 
+impl Record {
+    fn decode_legacy<B: Buf>(buf: &mut B) -> Result<(Self, usize)> {
+        let (key, key_len) = Bytes::deserialize(buf).context("record key")?;
+        let (val, val_len) = Bytes::deserialize(buf).context("record value")?;
+        let length = key_len + val_len;
+
+        let record = Self {
+            length,
+            attributes: RecordAttrs(0),
+            timestamp_delta: 0,
+            offset_delta: 0,
+            key: Some(key),
+            value: Some(val),
+            headers: Vec::new(),
+        };
+
+        Ok((record, length))
+    }
+
+    async fn read_legacy<R>(reader: &mut R) -> Result<(Self, usize)>
+    where
+        R: AsyncReadExt + Send + Unpin,
+    {
+        let (key, key_len) = Bytes::read(reader).await.context("record key")?;
+        let (val, val_len) = Bytes::read(reader).await.context("record value")?;
+        let length = key_len + val_len;
+
+        let record = Self {
+            length,
+            attributes: RecordAttrs(0),
+            timestamp_delta: 0,
+            offset_delta: 0,
+            key: Some(key),
+            value: Some(val),
+            headers: Vec::new(),
+        };
+
+        Ok((record, length))
+    }
+}
+
 impl Deserialize for Record {
-    fn decode<B: Buf>(buf: &mut B, _version: i16) -> Result<(Self, usize)> {
+    const DEFAULT_VERSION: i16 = <RecordBatch as Deserialize>::DEFAULT_VERSION;
+
+    fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<(Self, usize)> {
+        if version < <Self as Deserialize>::DEFAULT_VERSION {
+            return Self::decode_legacy(buf).context("decode legacy record");
+        }
+
         let mut byte_size = 0;
 
         let (length, n) = VarInt::deserialize(buf).context("record length")?;
@@ -388,6 +607,12 @@ impl AsyncDeserialize for Record {
     where
         R: AsyncReadExt + Send + Unpin,
     {
+        if version < <Self as AsyncDeserialize>::DEFAULT_VERSION {
+            return Self::read_legacy(reader)
+                .await
+                .context("read legacy record");
+        }
+
         let (length, n) = VarInt::read_from(reader, version)
             .await
             .context("record length")?;
@@ -506,6 +731,19 @@ pub enum Compression {
     Zstd = 4,
 }
 
+impl Compression {
+    /// Decode legacy compression for `magic` in `{0, 1}`
+    fn decode_legacy(attributes: i8, version: i8) -> Result<Self> {
+        Ok(match attributes & 0x7 {
+            0 => Self::None,
+            1 => Self::Gzip,
+            2 => Self::Snappy,
+            3 if version > 0 => Self::Lz4,
+            other => bail!("unsupported compression: {other}"),
+        })
+    }
+}
+
 impl TryFrom<i16> for Compression {
     type Error = anyhow::Error;
 
@@ -525,6 +763,14 @@ impl TryFrom<i16> for Compression {
 pub enum TimestampType {
     Create = 0,
     LogAppend = 1,
+}
+
+impl From<i8> for TimestampType {
+    /// Decode legacy timestamp type for `magic` in `{0, 1}`
+    #[inline]
+    fn from(attributes: i8) -> Self {
+        Self::from(attributes as i16)
+    }
 }
 
 impl From<i16> for TimestampType {
