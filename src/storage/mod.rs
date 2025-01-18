@@ -148,11 +148,15 @@ impl StorageInner {
             .await
             .context("find topics in cluster metadata")?;
 
+        // NOTE: Topic IDs (UUID) is treated as immutable
+        #[allow(clippy::mutable_key_type)]
         let topics = topics
             .into_iter()
             .map(|topic| (topic.name.clone(), topic))
             .collect::<HashMap<_, _>>();
 
+        // NOTE: Bytes are only mutable due to ref-counting, but otherwise stay immutable
+        #[allow(clippy::mutable_key_type)]
         let log_index = index_logs(&log_dirs, &topics)
             .await
             .context("indexing partition logs")?;
@@ -295,6 +299,7 @@ pub enum FetchResult {
     OffsetOutOfRange,
 }
 
+#[allow(clippy::mutable_key_type)]
 async fn index_logs(
     log_dirs: &[LogDir],
     topics: &HashMap<StrBytes, Topic>,

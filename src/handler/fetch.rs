@@ -60,6 +60,8 @@ impl Handler for FetchHandler {
 
         loop {
             tokio::select! {
+                // FIXME: don't break, notify tasks to complete if waiting for `body.min_bytes`
+                // (i.e., implement a Purgatory)
                 _ = &mut sleep, if !timeout.is_zero() => break,
 
                 maybe_result = tasks.join_next() => {

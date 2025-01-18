@@ -1,0 +1,4 @@
+# NOTE: Keep version in synch with codecrafters.yml!
+[toolchain]
+channel = "1.77.2"
+components = ["clippy", "rustfmt", "rust-analyzer"]

@@ -190,6 +190,7 @@ impl AsyncSerialize for LogRef {
 
         // TODO: An interesting optimization would be to use https://linux.die.net/man/2/sendfile
         //  - sendfile(2) can send data (fd -> socket) without copying them to the userspace
+        //  - https://www.confluent.io/blog/kafka-producer-and-consumer-internals-4-consumer-fetch-requests
         //  - https://docs.rs/sendfile/latest/sendfile
         //  - NOTE: codecrafters runners unfortunately don't allow modifying Cargo.lock
 
